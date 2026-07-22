@@ -1,0 +1,22 @@
+{
+	"name": "obcaldian",
+	"version": "0.1.0",
+	"description": "Generate daily notes from your own template, with a plugin-managed section synced to selected Google calendars.",
+	"main": "main.js",
+	"scripts": {
+		"dev": "node esbuild.config.mjs",
+		"build": "tsc -noEmit -skipLibCheck && node esbuild.config.mjs production",
+		"version": "node version-bump.mjs && git add manifest.json versions.json"
+	},
+	"keywords": [],
+	"author": "lzccr",
+	"license": "MIT",
+	"devDependencies": {
+		"@types/node": "^20.11.5",
+		"builtin-modules": "^3.3.0",
+		"esbuild": "^0.19.11",
+		"obsidian": "latest",
+		"tslib": "2.6.2",
+		"typescript": "5.3.3"
+	}
+}

@@ -1,8 +1,15 @@
-import { App, Notice, PluginSettingTab, Setting } from "obsidian";
+import { App, Notice, PluginSettingTab, SecretComponent, Setting } from "obsidian";
 import type ObcaldianPlugin from "./main";
-import { connectGoogleAccount, disconnectGoogleAccount } from "./googleAuth";
+import {
+	connectGoogleAccount,
+	disconnectGoogleAccount,
+	getClientSecret,
+	isConnected,
+	setClientSecret,
+} from "./googleAuth";
 import { listCalendars } from "./googleCalendar";
 import { syncAll } from "./sync";
+import { isValidTimeZone } from "./timezone";
 
 export class ObcaldianSettingTab extends PluginSettingTab {
 	plugin: ObcaldianPlugin;
@@ -16,6 +23,7 @@ export class ObcaldianSettingTab extends PluginSettingTab {
 		const { containerEl } = this;
 		containerEl.empty();
 		const settings = this.plugin.settings;
+		const deps = this.plugin.authDeps();
 
 		containerEl.createEl("h2", { text: "Obcaldian" });
 
@@ -46,6 +54,43 @@ export class ObcaldianSettingTab extends PluginSettingTab {
 					})
 			);
 
+		const timezoneSetting = new Setting(containerEl)
+			.setName("Timezone")
+			.setDesc(
+				"IANA time zone (e.g. America/New_York) used to align each day's sync window with Google Calendar. Defaults to your system timezone."
+			)
+			.addText((text) =>
+				text.setValue(settings.timezone).onChange(async (value) => {
+					const trimmed = value.trim();
+					if (!isValidTimeZone(trimmed)) {
+						timezoneSetting.setErrorMessage(
+							"Not a recognized IANA time zone, e.g. America/New_York."
+						);
+						return;
+					}
+					timezoneSetting.setErrorMessage(null);
+					settings.timezone = trimmed;
+					await this.plugin.saveSettings();
+				})
+			);
+
+		new Setting(containerEl)
+			.setName("Days ahead to sync")
+			.setDesc(
+				'Default number of days beyond today that "Sync now" covers. The "Sync next N days..." command can override this per run.'
+			)
+			.addText((text) => {
+				text.inputEl.type = "number";
+				text.inputEl.min = "0";
+				text.setValue(String(settings.syncDaysAhead)).onChange(async (value) => {
+					const parsed = Number(value);
+					if (Number.isFinite(parsed) && parsed >= 0) {
+						settings.syncDaysAhead = Math.floor(parsed);
+						await this.plugin.saveSettings();
+					}
+				});
+			});
+
 		containerEl.createEl("h3", { text: "Google account" });
 
 		new Setting(containerEl)
@@ -58,25 +103,26 @@ export class ObcaldianSettingTab extends PluginSettingTab {
 				})
 			);
 
-		new Setting(containerEl).setName("Client secret").addText((text) => {
-			text.inputEl.type = "password";
-			text.setValue(settings.googleClientSecret).onChange(async (value) => {
-				settings.googleClientSecret = value.trim();
-				await this.plugin.saveSettings();
-			});
-		});
+		new Setting(containerEl)
+			.setName("Client secret")
+			.setDesc("Stored in Obsidian's secret storage, not in plain text in your vault.")
+			.addComponent((el) =>
+				new SecretComponent(this.app, el).setValue(getClientSecret(deps)).onChange((value) => {
+					setClientSecret(deps, value.trim());
+				})
+			);
 
-		const status = settings.tokens ? "Connected" : "Not connected";
+		const connected = isConnected(deps);
 		new Setting(containerEl)
 			.setName("Google account")
-			.setDesc(status)
+			.setDesc(connected ? "Connected" : "Not connected")
 			.addButton((btn) =>
 				btn
-					.setButtonText(settings.tokens ? "Reconnect" : "Connect")
+					.setButtonText(connected ? "Reconnect" : "Connect")
 					.setCta()
 					.onClick(async () => {
 						try {
-							await connectGoogleAccount(this.plugin.authDeps());
+							await connectGoogleAccount(deps);
 							new Notice("Obcaldian: Google account connected.");
 							await this.refreshCalendarList();
 							this.display();
@@ -88,9 +134,9 @@ export class ObcaldianSettingTab extends PluginSettingTab {
 			.addButton((btn) =>
 				btn
 					.setButtonText("Disconnect")
-					.setDisabled(!settings.tokens)
+					.setDisabled(!connected)
 					.onClick(async () => {
-						await disconnectGoogleAccount(this.plugin.authDeps());
+						await disconnectGoogleAccount(deps);
 						new Notice("Obcaldian: Google account disconnected.");
 						this.display();
 					})
@@ -104,7 +150,7 @@ export class ObcaldianSettingTab extends PluginSettingTab {
 			.addButton((btn) =>
 				btn
 					.setButtonText("Refresh")
-					.setDisabled(!settings.tokens)
+					.setDisabled(!connected)
 					.onClick(async () => {
 						await this.refreshCalendarList();
 						this.display();
@@ -113,7 +159,7 @@ export class ObcaldianSettingTab extends PluginSettingTab {
 
 		if (settings.calendars.length === 0) {
 			containerEl.createEl("p", {
-				text: settings.tokens
+				text: connected
 					? "No calendars loaded yet — click Refresh."
 					: "Connect your Google account, then refresh to list your calendars.",
 				cls: "obcaldian-status",
@@ -143,7 +189,7 @@ export class ObcaldianSettingTab extends PluginSettingTab {
 		containerEl.createEl("h3", { text: "Sync" });
 		new Setting(containerEl)
 			.setName("Sync now")
-			.setDesc("Pull events from all enabled calendars into today's and tomorrow's notes.")
+			.setDesc("Pull events from all enabled calendars into today's note and the configured days ahead.")
 			.addButton((btn) =>
 				btn
 					.setButtonText("Sync now")
@@ -152,6 +198,22 @@ export class ObcaldianSettingTab extends PluginSettingTab {
 						await syncAll(this.app.vault, this.plugin.authDeps());
 					})
 			);
+
+		new Setting(containerEl)
+			.setName("Auto-sync interval (minutes)")
+			.setDesc("Automatically sync in the background this often, with no notifications. 0 disables it.")
+			.addText((text) => {
+				text.inputEl.type = "number";
+				text.inputEl.min = "0";
+				text.setValue(String(settings.autoSyncIntervalMinutes)).onChange(async (value) => {
+					const parsed = Number(value);
+					if (Number.isFinite(parsed) && parsed >= 0) {
+						settings.autoSyncIntervalMinutes = Math.floor(parsed);
+						await this.plugin.saveSettings();
+						this.plugin.applyAutoSyncInterval();
+					}
+				});
+			});
 	}
 
 	private async refreshCalendarList(): Promise<void> {

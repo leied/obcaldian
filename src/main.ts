@@ -2,15 +2,35 @@ import { Plugin } from "obsidian";
 import { DEFAULT_SETTINGS, type ObcaldianSettings } from "./settings";
 import { ObcaldianSettingTab } from "./settingsTab";
 import { ensureDailyNote } from "./dailyNote";
-import { syncAll, syncSingleNote } from "./sync";
-import type { AuthDeps } from "./googleAuth";
+import { autoSyncTick, syncAll, syncRange, syncSingleNote, type SyncOptions } from "./sync";
+import { migrateLegacySecrets, type AuthDeps } from "./googleAuth";
+import { SyncDaysModal } from "./syncDaysModal";
+
+type SyncBarState =
+	| { kind: "idle" }
+	| { kind: "syncing" }
+	| { kind: "success"; at: number; dayCount: number }
+	| { kind: "error"; message: string };
 
 export default class ObcaldianPlugin extends Plugin {
 	settings!: ObcaldianSettings;
+	private autoSyncIntervalId: number | null = null;
+	private statusBarItem!: HTMLElement;
+	private syncBarState: SyncBarState = { kind: "idle" };
 
 	async onload() {
 		await this.loadSettings();
 		this.addSettingTab(new ObcaldianSettingTab(this.app, this));
+		this.applyAutoSyncInterval();
+
+		this.statusBarItem = this.addStatusBarItem();
+		this.statusBarItem.addClass("obcaldian-status-bar-item");
+		this.statusBarItem.onClickEvent(() => {
+			void syncAll(this.app.vault, this.authDeps(), this.statusBarSyncOptions());
+		});
+		this.renderStatusBar();
+		// "synced Xm ago" goes stale as time passes without a resync; refresh its text periodically.
+		this.registerInterval(window.setInterval(() => this.renderStatusBar(), 30_000));
 
 		this.addCommand({
 			id: "open-today",
@@ -27,7 +47,17 @@ export default class ObcaldianPlugin extends Plugin {
 		this.addCommand({
 			id: "sync-calendars",
 			name: "Sync Google calendars now",
-			callback: () => syncAll(this.app.vault, this.authDeps()),
+			callback: () => syncAll(this.app.vault, this.authDeps(), this.statusBarSyncOptions()),
+		});
+
+		this.addCommand({
+			id: "sync-next-days",
+			name: "Sync next N days...",
+			callback: () => {
+				new SyncDaysModal(this.app, this.settings.syncDaysAhead, (days) => {
+					void syncRange(this.app.vault, this.authDeps(), days, this.statusBarSyncOptions());
+				}).open();
+			},
 		});
 
 		this.addRibbonIcon("calendar-plus", "Open today's daily note", () => {
@@ -36,7 +66,69 @@ export default class ObcaldianPlugin extends Plugin {
 	}
 
 	authDeps(): AuthDeps {
-		return { settings: this.settings, saveSettings: () => this.saveSettings() };
+		return {
+			settings: this.settings,
+			saveSettings: () => this.saveSettings(),
+			secretStorage: this.app.secretStorage,
+		};
+	}
+
+	/** Re-reads settings.autoSyncIntervalMinutes and (re)starts the background timer accordingly. */
+	applyAutoSyncInterval(): void {
+		if (this.autoSyncIntervalId !== null) {
+			window.clearInterval(this.autoSyncIntervalId);
+			this.autoSyncIntervalId = null;
+		}
+		const minutes = this.settings.autoSyncIntervalMinutes;
+		if (minutes > 0) {
+			const id = window.setInterval(() => {
+				void autoSyncTick(this.app.vault, this.authDeps(), this.statusBarSyncOptions());
+			}, minutes * 60_000);
+			this.autoSyncIntervalId = id;
+			this.registerInterval(id);
+		}
+	}
+
+	/** Callbacks that drive the status bar item from any sync call site (commands, modal, auto-sync). */
+	private statusBarSyncOptions(): SyncOptions {
+		return {
+			onStart: () => {
+				this.syncBarState = { kind: "syncing" };
+				this.renderStatusBar();
+			},
+			onSuccess: (dayCount) => {
+				this.syncBarState = { kind: "success", at: Date.now(), dayCount };
+				this.renderStatusBar();
+			},
+			onError: (message) => {
+				this.syncBarState = { kind: "error", message };
+				this.renderStatusBar();
+			},
+		};
+	}
+
+	private renderStatusBar(): void {
+		const state = this.syncBarState;
+		if (state.kind === "idle") {
+			this.statusBarItem.setText("");
+			this.statusBarItem.setAttr("aria-label", "");
+			return;
+		}
+		if (state.kind === "syncing") {
+			this.statusBarItem.setText("Obcaldian: syncing…");
+			this.statusBarItem.setAttr("aria-label", "Syncing Google calendars…");
+			return;
+		}
+		if (state.kind === "success") {
+			this.statusBarItem.setText(`Obcaldian: synced ${window.moment(state.at).fromNow()}`);
+			this.statusBarItem.setAttr(
+				"aria-label",
+				`Synced ${state.dayCount} day${state.dayCount === 1 ? "" : "s"} ahead. Click to sync now.`
+			);
+			return;
+		}
+		this.statusBarItem.setText("Obcaldian: sync failed");
+		this.statusBarItem.setAttr("aria-label", `${state.message}. Click to retry.`);
 	}
 
 	private async openDailyNote(dayOffset: number) {
@@ -50,7 +142,12 @@ export default class ObcaldianPlugin extends Plugin {
 	}
 
 	async loadSettings() {
-		this.settings = Object.assign({}, DEFAULT_SETTINGS, await this.loadData());
+		const raw = ((await this.loadData()) ?? {}) as Record<string, unknown>;
+		const migrated = migrateLegacySecrets(this.app.secretStorage, raw);
+		this.settings = Object.assign({}, DEFAULT_SETTINGS, raw);
+		if (migrated) {
+			await this.saveSettings();
+		}
 	}
 
 	async saveSettings() {

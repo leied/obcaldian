@@ -58,11 +58,46 @@ export async function ensureDailyNote(
 	return vault.create(path, rendered);
 }
 
+const FOOTNOTE_CONTINUATION_INDENT = "    ";
+const MIN_ATTENDEES_TO_LIST = 3;
+
+/**
+ * Builds a footnote's body for an event: its description (if any), plus a
+ * participant list when there are enough attendees to be worth naming. Lines
+ * after the first are indented so markdown treats them as part of the same
+ * footnote definition. Returns null when there's nothing worth footnoting.
+ */
+function footnoteBody(ev: GoogleEvent): string | null {
+	const parts: string[] = [];
+	const description = ev.description?.trim();
+	if (description) parts.push(description);
+
+	const attendees = ev.attendees ?? [];
+	if (attendees.length >= MIN_ATTENDEES_TO_LIST) {
+		const names = attendees.map((a) => a.displayName?.trim() || a.email).join(", ");
+		parts.push(`Participants: ${names}`);
+	}
+
+	if (parts.length === 0) return null;
+	return parts.join(`\n${FOOTNOTE_CONTINUATION_INDENT}`);
+}
+
+/** Formats a timed event's start (and end, if distinct) as "HH:mm" or "HH:mm-HH:mm". Null for all-day events. */
+function formatTimeRange(ev: GoogleEvent): string | null {
+	if (!ev.start.dateTime) return null;
+	const start = window.moment(ev.start.dateTime).format("HH:mm");
+	const end = ev.end.dateTime ? window.moment(ev.end.dateTime).format("HH:mm") : null;
+	return end && end !== start ? `${start}-${end}` : start;
+}
+
 export function renderCalendarBlock(
 	calendars: CalendarConfig[],
 	eventsByCalendar: Map<string, GoogleEvent[]>
 ): string {
 	const lines: string[] = [];
+	const footnotes: string[] = [];
+	let footnoteCount = 0;
+
 	for (const cal of calendars) {
 		if (!cal.enabled) continue;
 		const events = eventsByCalendar.get(cal.id) ?? [];
@@ -70,17 +105,28 @@ export function renderCalendarBlock(
 		lines.push(`**${cal.summary}**`);
 		for (const ev of events) {
 			const bullet = cal.addAs === "checkbox" ? "- [ ]" : "-";
-			const time = ev.start.dateTime
-				? window.moment(ev.start.dateTime).format("HH:mm")
-				: null;
-			const title = ev.summary || "(untitled event)";
-			lines.push(time ? `${bullet} ${time} ${title}` : `${bullet} ${title}`);
+			const time = formatTimeRange(ev);
+			const rawTitle = ev.summary || "(untitled event)";
+			const title = ev.htmlLink ? `[${rawTitle}](${ev.htmlLink})` : rawTitle;
+
+			let marker = "";
+			const body = footnoteBody(ev);
+			if (body) {
+				footnoteCount += 1;
+				marker = `[^${footnoteCount}]`;
+				footnotes.push(`[^${footnoteCount}]: ${body}`);
+			}
+
+			lines.push(time ? `${bullet} ${time} ${title}${marker}` : `${bullet} ${title}${marker}`);
 		}
 	}
 	if (lines.length === 0) {
 		return "_(no events)_";
 	}
-	return lines.join("\n");
+	if (footnotes.length === 0) {
+		return lines.join("\n");
+	}
+	return `${lines.join("\n")}\n\n${footnotes.join("\n")}`;
 }
 
 /**

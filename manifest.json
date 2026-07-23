@@ -2,7 +2,7 @@
 	"id": "obcaldian",
 	"name": "Obcaldian",
 	"version": "0.1.0",
-	"minAppVersion": "1.4.0",
+	"minAppVersion": "1.11.4",
 	"description": "Generate daily notes from your own template, with a plugin-managed section synced to selected Google calendars.",
 	"author": "lzccr",
 	"authorUrl": "",

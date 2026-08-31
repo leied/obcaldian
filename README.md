@@ -14,7 +14,8 @@ plugin-managed section of each note synced with selected Google Calendars.
   sync stays correct even if your calendar and machine disagree.
 - Sync today plus a configurable number of days ahead, or run a one-off "Sync next N days" from the
   command palette.
-- Optional background auto-sync on an interval.
+- Quiet background calendar checks, every three hours by default on new installations and fully
+  configurable (including off).
 - Google client secret and OAuth tokens are stored in Obsidian's own secret storage, never in plain
   text in your vault's `data.json`.
 
@@ -45,6 +46,9 @@ Example template:
 
 ## Notes
 ```
+
+If `{calendar}` is missing, Obcaldian shows a warning and does not create the note. This avoids
+creating a daily note that the plugin can never safely synchronize.
 
 ### 3. Configure the plugin
 
@@ -130,10 +134,38 @@ in your vault's `data.json`.
 - **Sync next N days...** — prompts for a day count and syncs that range once, without changing
   your default.
 
+All four commands also have ribbon icons for quick access: today, tomorrow, sync now, and a
+one-off range sync. You can hide unwanted ribbon actions using Obsidian's ribbon configuration.
+
+## Multi-day events
+
+Google returns an event when it overlaps the day being queried. As a result, an all-day event that
+spans several dates—and a timed event that crosses midnight—is currently rendered in every daily
+note whose query window it overlaps. Each occurrence is rendered independently using the same
+format as an ordinary event.
+
+There are two important current limitations:
+
+- The line is not yet annotated with `Day 2/3`, so the reader cannot tell its position in the span.
+- Sync regenerates checkbox lines as unchecked. Checking a multi-day event in one note neither
+  survives the next sync nor propagates to the event's other days.
+
+The planned implementation will use Google's stable event ID in an invisible HTML comment, derive
+the event's span in the configured timezone, label each daily occurrence, preserve prior checkbox
+state, and—with confirmation during an interactive sync—offer to mark the event complete across
+all covered days. Background sync will never open a confirmation dialog. See
+[`docs/plans/multi-day-events.md`](docs/plans/multi-day-events.md) for the detailed design.
+
 ## Development
 
 - `npm run dev` — esbuild in watch mode.
 - `npm run build` — type-checks (`tsc -noEmit`) and produces a minified production build.
 - `npm test` — runs the test suite.
+- `npm run validate:release` — validates publication files and version metadata after a build.
+- `npm run check` — runs the production build, tests, and release validation used by CI.
+
+CI tests Node.js 20 and 22 and uploads an installable plugin artifact. Tag builds additionally
+require the tag to exactly match `manifest.json`, generate a provenance attestation, and create a
+draft GitHub release for final review.
 
 See `CLAUDE.md` for an architecture overview if you're working on the plugin itself.

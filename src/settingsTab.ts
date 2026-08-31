@@ -202,8 +202,10 @@ export class ObcaldianSettingTab extends PluginSettingTab {
 			);
 
 		new Setting(containerEl)
-			.setName("Auto-sync interval (minutes)")
-			.setDesc("Automatically sync in the background this often, with no notifications. 0 disables it.")
+			.setName("Automatic calendar check (minutes)")
+			.setDesc(
+				"Quietly check and sync enabled calendars this often. Defaults to every 3 hours; 0 disables it."
+			)
 			.addText((text) => {
 				text.inputEl.type = "number";
 				text.inputEl.min = "0";

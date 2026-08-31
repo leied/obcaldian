@@ -1,4 +1,4 @@
-import { Plugin } from "obsidian";
+import { Notice, Plugin } from "obsidian";
 import { DEFAULT_SETTINGS, type ObcaldianSettings } from "./settings";
 import { ObcaldianSettingTab } from "./settingsTab";
 import { ensureDailyNote } from "./dailyNote";
@@ -53,16 +53,27 @@ export default class ObcaldianPlugin extends Plugin {
 		this.addCommand({
 			id: "sync-next-days",
 			name: "Sync next N days...",
-			callback: () => {
-				new SyncDaysModal(this.app, this.settings.syncDaysAhead, (days) => {
-					void syncRange(this.app.vault, this.authDeps(), days, this.statusBarSyncOptions());
-				}).open();
-			},
+			callback: () => this.openSyncDaysModal(),
 		});
 
 		this.addRibbonIcon("calendar-plus", "Open today's daily note", () => {
-			this.openDailyNote(0);
+			void this.openDailyNote(0);
 		});
+		this.addRibbonIcon("calendar-days", "Open tomorrow's daily note", () => {
+			void this.openDailyNote(1);
+		});
+		this.addRibbonIcon("refresh-cw", "Sync Google calendars now", () => {
+			void syncAll(this.app.vault, this.authDeps(), this.statusBarSyncOptions());
+		});
+		this.addRibbonIcon("calendar-range", "Sync next N days...", () => {
+			this.openSyncDaysModal();
+		});
+	}
+
+	private openSyncDaysModal(): void {
+		new SyncDaysModal(this.app, this.settings.syncDaysAhead, (days) => {
+			void syncRange(this.app.vault, this.authDeps(), days, this.statusBarSyncOptions());
+		}).open();
 	}
 
 	authDeps(): AuthDeps {
@@ -132,13 +143,17 @@ export default class ObcaldianPlugin extends Plugin {
 	}
 
 	private async openDailyNote(dayOffset: number) {
-		const date = window.moment().add(dayOffset, "day");
-		const file = await ensureDailyNote(this.app.vault, this.settings, date);
-		const wasJustCreated = Date.now() - file.stat.ctime < 2000;
-		if (wasJustCreated) {
-			await syncSingleNote(this.app.vault, this.authDeps(), date, file);
+		try {
+			const date = window.moment().add(dayOffset, "day");
+			const file = await ensureDailyNote(this.app.vault, this.settings, date);
+			const wasJustCreated = Date.now() - file.stat.ctime < 2000;
+			if (wasJustCreated) {
+				await syncSingleNote(this.app.vault, this.authDeps(), date, file);
+			}
+			await this.app.workspace.getLeaf(false).openFile(file);
+		} catch (error) {
+			new Notice(`Obcaldian: ${(error as Error).message}`);
 		}
-		await this.app.workspace.getLeaf(false).openFile(file);
 	}
 
 	async loadSettings() {

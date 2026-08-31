@@ -233,7 +233,7 @@ describe("ensureDailyNote", () => {
 		const settings = { ...DEFAULT_SETTINGS, templatePath: "Templates/Daily.md" };
 
 		await expect(ensureDailyNote(vault as never, settings, DATE)).rejects.toThrow(
-			/Template must contain \{calendar\}/
+			/template is missing \{calendar\}/i
 		);
 		expect(vault.contentOf("20260722.md")).toBeUndefined();
 	});

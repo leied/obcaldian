@@ -1,0 +1,60 @@
+import { existsSync, readFileSync } from "node:fs";
+
+function fail(message) {
+	console.error(`Release validation failed: ${message}`);
+	process.exitCode = 1;
+}
+
+function readJson(path) {
+	try {
+		return JSON.parse(readFileSync(path, "utf8"));
+	} catch (error) {
+		fail(`${path} is not valid JSON: ${error.message}`);
+		return {};
+	}
+}
+
+const manifest = readJson("manifest.json");
+const packageJson = readJson("package.json");
+const versions = readJson("versions.json");
+const requiredManifestFields = [
+	"id",
+	"name",
+	"version",
+	"minAppVersion",
+	"description",
+	"author",
+	"isDesktopOnly",
+];
+
+for (const field of requiredManifestFields) {
+	if (manifest[field] === undefined || manifest[field] === "") {
+		fail(`manifest.json is missing required field "${field}".`);
+	}
+}
+
+if (!/^[a-z0-9-]+$/.test(manifest.id ?? "")) {
+	fail("manifest id must contain only lowercase letters, numbers, and hyphens.");
+}
+if (!/^\d+\.\d+\.\d+$/.test(manifest.version ?? "")) {
+	fail("manifest version must use x.y.z semantic-version format.");
+}
+if (packageJson.version !== manifest.version) {
+	fail(`package.json version ${packageJson.version} does not match manifest ${manifest.version}.`);
+}
+if (versions[manifest.version] !== manifest.minAppVersion) {
+	fail(
+		`versions.json must map ${manifest.version} to minimum app version ${manifest.minAppVersion}.`
+	);
+}
+if (process.env.RELEASE_TAG && process.env.RELEASE_TAG !== manifest.version) {
+	fail(`release tag ${process.env.RELEASE_TAG} must exactly match ${manifest.version}.`);
+}
+
+for (const path of ["README.md", "LICENSE", "main.js", "manifest.json", "styles.css"]) {
+	if (!existsSync(path)) fail(`required publication file ${path} is missing.`);
+}
+
+if (!process.exitCode) {
+	console.log(`Release files are valid for Obcaldian ${manifest.version}.`);
+}

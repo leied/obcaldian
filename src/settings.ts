@@ -43,5 +43,6 @@ export const DEFAULT_SETTINGS: ObcaldianSettings = {
 	templatePath: "",
 	timezone: detectSystemTimezone(),
 	syncDaysAhead: 1,
-	autoSyncIntervalMinutes: 0,
+	// Keep new installations reasonably fresh without polling Google aggressively.
+	autoSyncIntervalMinutes: 180,
 };

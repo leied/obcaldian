@@ -15,14 +15,18 @@ never edit it directly; edit `src/*.ts`.
 - `npm run build` — type-checks with `tsc -noEmit -skipLibCheck`, then produces a minified
   production `main.js` via esbuild.
 - `npm test` — runs the vitest suite in `tests/`.
+- `npm run validate:release` — validates publication files and version metadata; when
+  `RELEASE_TAG` is set, also requires the tag to exactly match `manifest.json`.
+- `npm run check` — runs build, tests, and release validation (the CI entry point).
 - `npm version <patch|minor|major>` — bumps `package.json`, then runs `version-bump.mjs`, which
-  syncs `manifest.json`'s `version` and appends an entry to `versions.json` keyed by
-  `minAppVersion`. Also stages `manifest.json`/`versions.json`.
+  syncs `manifest.json`'s `version` and appends a version-to-minimum-app-version entry to
+  `versions.json`. Also stages `manifest.json`/`versions.json`.
 
-There is no lint config. `npm run build` (`tsc -noEmit`) and `npm test` are both run in CI
-(`.github/workflows/ci.yml`) on every push/PR to `main`. Pushing any tag triggers
-`.github/workflows/release.yml`, which builds, tests, and publishes a GitHub Release with
-`main.js`, `manifest.json`, `styles.css` attached (plus a zipped copy) via `gh release create`.
+There is no lint config. `npm run check` runs in CI (`.github/workflows/ci.yml`) on Node 20 and 22
+for every push/PR to `main`, and the Node 20 job uploads an installable artifact. Pushing any tag
+triggers `.github/workflows/release.yml`, which requires the tag to equal the manifest version,
+builds, tests, validates, attests the artifacts, and creates a draft GitHub Release with `main.js`,
+`manifest.json`, `styles.css`, and a zipped copy.
 
 To manually exercise the plugin, symlink or copy this repo (built) into an Obsidian vault's
 `.obsidian/plugins/obcaldian/` folder and enable it in Obsidian's Community Plugins settings.
@@ -50,6 +54,8 @@ Module responsibilities in `src/`, in dependency order:
   but is user-overridable. Notably absent: the Google client secret and OAuth tokens — those live in
   Obsidian's secret storage, not here (see `googleAuth.ts`), since this object is persisted to
   plugin `data.json` in plain text. Only the non-secret `tokenExpiresAt` timestamp stays here.
+  New installations default to an infrequent three-hour automatic calendar check; persisted users'
+  existing interval choice is preserved, and `0` still disables it.
 - **`googleAuth.ts`** — the Google OAuth "installed app" loopback flow: opens the system browser,
   spins up a local `http` server on `127.0.0.1:42813` to catch the redirect, exchanges the code for
   tokens, and refreshes access tokens on expiry (`getValidAccessToken`). Requires Node's `http`
@@ -123,7 +129,7 @@ Module responsibilities in `src/`, in dependency order:
   `plugin.applyAutoSyncInterval()`
   immediately so the new interval takes effect without a plugin reload.
 - **`main.ts`** — the `Plugin` entry point. Registers commands (open today/tomorrow, sync now, sync
-  next N days) and a ribbon icon. Owns `authDeps()`, the single place that builds the `AuthDeps`
+  next N days) and matching ribbon icons for all four actions. Owns `authDeps()`, the single place that builds the `AuthDeps`
   object (including `this.app.secretStorage`) passed into the auth/sync modules. `loadSettings` runs
   `migrateLegacySecrets` against the raw loaded data before merging with `DEFAULT_SETTINGS`.
   `applyAutoSyncInterval()` clears any existing background-sync `window.setInterval` and, if
@@ -135,8 +141,10 @@ Module responsibilities in `src/`, in dependency order:
     `statusBarSyncOptions()`, a `SyncOptions` object passed to every `syncAll`/`syncRange`/
     `autoSyncTick` call site so all of them (explicit commands, the days modal, the background
     timer) update the same `syncBarState`. Clicking the item triggers `syncAll`. A separate
-    30-second interval only re-renders the "Xm ago" text against the already-stored timestamp; it
-    doesn't trigger a resync.
+  30-second interval only re-renders the "Xm ago" text against the already-stored timestamp; it
+  doesn't trigger a resync.
+  - `openDailyNote` catches template/configuration errors at the action boundary and displays a
+    `Notice`, so a template missing `{calendar}` warns the user and creates no unusable note.
 
 ### Key invariants to preserve
 

@@ -10,6 +10,10 @@ describe("DEFAULT_SETTINGS", () => {
 		expect(DEFAULT_SETTINGS.syncDaysAhead).toBe(1);
 	});
 
+	it("defaults automatic calendar checks to an infrequent three-hour interval", () => {
+		expect(DEFAULT_SETTINGS.autoSyncIntervalMinutes).toBe(180);
+	});
+
 	it("no longer carries a plaintext client secret or token fields", () => {
 		expect(DEFAULT_SETTINGS).not.toHaveProperty("googleClientSecret");
 		expect(DEFAULT_SETTINGS).not.toHaveProperty("tokens");

@@ -47,7 +47,9 @@ export async function ensureDailyNote(
 
 	const templateContent = await vault.read(templateFile);
 	if (!templateContent.includes(CALENDAR_TOKEN)) {
-		throw new Error(`Template must contain ${CALENDAR_TOKEN}: ${settings.templatePath}`);
+		throw new Error(
+			`Your template is missing ${CALENDAR_TOKEN}. Add it where the synced calendar should appear; no note was created.`
+		);
 	}
 	const rendered = templateContent
 		.replace(/\{\{date\}\}/g, date.format("YYYY-MM-DD"))

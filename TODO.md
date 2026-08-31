@@ -18,20 +18,22 @@ ordered roughly by user impact and release risk, not by implementation difficult
 
 ## Event identity and multi-day events
 
-- [ ] Add Google event IDs to the event model and embed stable, invisible event markers in rendered
+- [x] Add Google event IDs to the event model and embed stable, invisible event markers in rendered
   Markdown.
-- [ ] Preserve checkbox state across syncs. Start with multi-day events as designed in
-  [`docs/plans/multi-day-events.md`](docs/plans/multi-day-events.md), then extend preservation to
-  single-day checkbox events.
-- [ ] Calculate all-day and overnight spans in the configured timezone and render `Day N/Total`
+- [x] Preserve checkbox state for multi-day events across syncs, including persisted propagation
+  into notes that have not been synced yet.
+- [ ] Extend checkbox preservation to single-day checkbox events.
+- [x] Calculate all-day and overnight spans in the configured timezone and render `Day N/Total`
   annotations on every covered day.
-- [ ] During interactive sync, ask before propagating a completed multi-day event across its other
+- [x] During interactive sync, ask before propagating a completed multi-day event across its other
   notes. During background sync, preserve existing states without opening a modal.
 
 ## Sync integrity and efficiency
 
-- [ ] Fetch and validate the entire requested date range before writing any notes. Per-day writes
-  are protected now, but a later failure can still leave an earlier day updated.
+- [x] Fetch the entire requested date range before writing any notes, preventing a later network
+  failure from leaving an earlier date updated.
+- [ ] Preflight every target note/template before the write phase too, making non-network failures
+  atomic across the requested range.
 - [ ] Implement Google Calendar incremental sync tokens and local caching to reduce API traffic for
   background checks.
 - [ ] Prevent or coalesce overlapping manual and automatic sync runs.
@@ -57,6 +59,17 @@ ordered roughly by user impact and release risk, not by implementation difficult
 
 ## OAuth experience
 
+- [ ] Implement the supported connection roadmap in
+  [`docs/plans/google-connection-options.md`](docs/plans/google-connection-options.md). Google App
+  Passwords were investigated and rejected because Calendar REST and current CalDAV require OAuth
+  2.0; do not collect a credential the endpoints cannot use.
+- [ ] Make user-owned desktop OAuth credentials JSON import the primary full-featured setup path.
+  Keep all token exchange and Calendar requests local between Obsidian and Google.
+- [ ] Add an auditable outbound-host allowlist and CI test: Google OAuth/Calendar plus local loopback
+  only, with no analytics, telemetry, proxy, or publisher-controlled endpoint.
+- [x] Reject publisher-managed OAuth as a project direction. Even without a hosted callback, it
+  centralizes application identity, consent, quota, and trust under the publisher's Google project.
+- [ ] Evaluate a per-calendar Secret iCal URL mode as a limited read-only/no-OAuth alternative.
 - [ ] Add an OAuth `state` nonce, callback timeout/cancellation, and guaranteed loopback-server
   cleanup.
 - [ ] Recognize revoked or expired refresh tokens and guide the user directly to reconnect.

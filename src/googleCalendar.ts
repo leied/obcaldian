@@ -15,6 +15,8 @@ export interface GoogleEventAttendee {
 }
 
 export interface GoogleEvent {
+	/** Stable Google event-instance ID. Present in API responses; optional for defensive rendering. */
+	id?: string;
 	summary: string;
 	description?: string;
 	htmlLink?: string;

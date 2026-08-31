@@ -56,6 +56,9 @@ Module responsibilities in `src/`, in dependency order:
   plugin `data.json` in plain text. Only the non-secret `tokenExpiresAt` timestamp stays here.
   New installations default to an infrequent three-hour automatic calendar check; persisted users'
   existing interval choice is preserved, and `0` still disables it.
+  `multiDayCompletionBehavior` selects independent/ask/automatic-following behavior, while
+  `multiDayCompletionRules` persists non-secret `{completedFrom,eventEnd}` decisions so
+  occurrences in notes synced later receive the chosen state.
 - **`googleAuth.ts`** — the Google OAuth "installed app" loopback flow: opens the system browser,
   spins up a local `http` server on `127.0.0.1:42813` to catch the redirect, exchanges the code for
   tokens, and refreshes access tokens on expiry (`getValidAccessToken`). Requires Node's `http`
@@ -82,7 +85,11 @@ Module responsibilities in `src/`, in dependency order:
   `listEventsForDay` builds its `timeMin`/`timeMax` from `zonedDayRange` and also passes `timeZone`
   to the API. Both list endpoints follow Google's `nextPageToken` so results aren't truncated.
   `GoogleEvent` includes `description`, `attendees`, and `htmlLink` (used for footnotes and the
-  event link) — all returned by the API by default, no extra `fields` param needed.
+  event link), plus Google's stable event-instance `id` for multi-day identity — all returned by
+  the API by default, no extra `fields` param needed.
+- **`multiDay.ts`** — pure date-span and event-identity logic. All-day `end.date` is treated as
+  exclusive; timed spans use the configured timezone and subtract 1ms from the end so an exact
+  midnight end doesn't claim the next day. Event markers combine calendar ID and Google event ID.
 - **`dailyNote.ts`** — note file logic with no network calls:
   - `ensureDailyNote` creates `YYYYMMDD.md` from the user's template if it doesn't exist yet
     (never rewrites an existing note's body), and rejects a template missing `{calendar}` before
@@ -103,21 +110,28 @@ Module responsibilities in `src/`, in dependency order:
     touches anything outside it) — description first, then a `Participants:` line only once
     attendees reach `MIN_ATTENDEES_TO_LIST` (3). Footnote numbering is a single counter threaded
     across all calendars in one render call.
+  - Multi-day events render `Day N/Total` plus an invisible event marker. Checkbox rendering accepts
+    a set of resolved event keys so sync can preserve or propagate completion state.
 - **`sync.ts`** — orchestrates the above. `syncRange(vault, deps, daysAhead, opts?)` syncs today plus
-  `daysAhead` additional days; `opts.notify` (default `true`) gates every `Notice` it and
-  `syncNoteForDate` would otherwise show — set `false` for a silent run (errors go to
-  `console.error` instead). `SyncOptions.onStart`/`onSuccess`/`onError` fire regardless of `notify`
+  `daysAhead` additional days. It fetches the complete range before any write, groups multi-day
+  checkbox events, scans existing notes across each full event span, resolves the configured
+  completion policy, then renders/writes. `opts.notify` (default `true`) gates every `Notice` — set
+  `false` for a silent run (errors go to `console.error` instead).
+  `SyncOptions.confirmMultiDay` keeps Modal/UI concerns outside this module; it is only called for
+  interactive `ask` syncs. `SyncOptions.onStart`/`onSuccess`/`onError` fire regardless of `notify`
   (used by `main.ts` to drive the status bar, independent of whether Notices are shown) — `onError`
   also fires for the "not connected"/"no calendars enabled" preconditions, with the same message
   text used to build the Notice. `syncAll` is `syncRange` using `settings.syncDaysAhead`, notifying;
   `autoSyncTick` is the same but silent, used by the background timer. `syncSingleNote` does one
   already-created note (used right after it's generated), always notifies, and does *not* take
   `SyncOptions` (it doesn't drive the status bar). All sync entry points gate on `isConnected(deps)`.
-  A failed calendar fetch aborts that day's write so an incomplete response cannot erase the
-  previous block, and missing markers are treated as a sync failure rather than success.
+  A failed calendar fetch aborts the entire range before any write, and missing markers are treated
+  as a sync failure rather than success. Propagation rules expire lazily 30 days after event end.
 - **`syncDaysModal.ts`** — a small `Modal` prompting for a day count, pre-filled from
   `settings.syncDaysAhead`, used by the "Sync next N days..." command for one-off ranges without
   touching the persisted default.
+- **`multiDayCompletionModal.ts`** — resolves a Promise<boolean> from “Keep days separate” / “Mark
+  following done.” Closing it is equivalent to keeping days separate. Background sync never opens it.
 - **`settingsTab.ts`** — the Obsidian settings UI. Reads/writes `plugin.settings` directly and
   calls `plugin.saveSettings()` after each change; calendar list refresh reconciles freshly fetched
   calendars against existing ones by `id` so user toggles/`addAs` choices survive a refresh. The
@@ -138,7 +152,7 @@ Module responsibilities in `src/`, in dependency order:
   settings tab changes that value.
   - A status bar item (`addStatusBarItem()`, next to Obsidian's built-in word/char count) shows
     live sync state — idle (blank), "syncing…", "synced Xm ago", or "sync failed" — driven by
-    `statusBarSyncOptions()`, a `SyncOptions` object passed to every `syncAll`/`syncRange`/
+    `syncOptions()`, a `SyncOptions` object passed to every `syncAll`/`syncRange`/
     `autoSyncTick` call site so all of them (explicit commands, the days modal, the background
     timer) update the same `syncBarState`. Clicking the item triggers `syncAll`. A separate
   30-second interval only re-renders the "Xm ago" text against the already-stored timestamp; it

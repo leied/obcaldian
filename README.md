@@ -139,22 +139,39 @@ one-off range sync. You can hide unwanted ribbon actions using Obsidian's ribbon
 
 ## Multi-day events
 
-Google returns an event when it overlaps the day being queried. As a result, an all-day event that
-spans several dates—and a timed event that crosses midnight—is currently rendered in every daily
-note whose query window it overlaps. Each occurrence is rendered independently using the same
-format as an ordinary event.
+Google returns an event whenever it overlaps the day being queried. Obcaldian renders an all-day
+event spanning several dates—and a timed event crossing midnight—in every overlapping daily note,
+annotated as `(Day 1/3)`, `(Day 2/3)`, and so on. The span is calculated in the configured timezone;
+Google's all-day end date is correctly treated as exclusive.
 
-There are two important current limitations:
+Multi-day checkbox lines contain an invisible event marker. On the next sync, Obcaldian uses that
+marker to preserve the checkbox state and offers three behaviors under Settings → Obcaldian → Sync:
 
-- The line is not yet annotated with `Day 2/3`, so the reader cannot tell its position in the span.
-- Sync regenerates checkbox lines as unchecked. Checking a multi-day event in one note neither
-  survives the next sync nor propagates to the event's other days.
+- **Keep each day independent** — preserve only the checkbox state already present in each note.
+- **Ask during manual sync** — when a checked day has later occurrences, ask whether that day and
+  every following day should be considered done. Declining keeps the dates independent. The prompt
+  appears again on a later manual sync while the dates still differ.
+- **Mark following days done** — automatically propagate from the earliest checked occurrence to
+  the end of the event. Earlier occurrences remain unchanged.
 
-The planned implementation will use Google's stable event ID in an invisible HTML comment, derive
-the event's span in the configured timezone, label each daily occurrence, preserve prior checkbox
-state, and—with confirmation during an interactive sync—offer to mark the event complete across
-all covered days. Background sync will never open a confirmation dialog. See
-[`docs/plans/multi-day-events.md`](docs/plans/multi-day-events.md) for the detailed design.
+### What happens to dates that have not been synced?
+
+Accepting the prompt—or selecting automatic propagation—stores a small rule keyed by the Google
+calendar and event ID. For example, checking Day 2 stores “completed from Day 2 through the event's
+end.” Obcaldian does not create every future note immediately. Instead, when Day 3 or Day 4 later
+enters a sync range, its occurrence is rendered checked from the stored rule.
+
+Background checks never open a modal. In **Ask** mode they preserve checkbox states already on disk
+but wait for the next manual sync before propagating. Accepted rules continue to apply silently.
+Rules expire 30 days after the event ends and can be removed immediately with **Clear** beside
+“Remembered multi-day completions.” Switching to **Keep each day independent** also clears them.
+While a remembered rule is active it wins during sync, so manually unchecking one propagated line
+will be reversed unless the remembered rules are cleared first.
+
+Because older plugin versions did not emit event markers, an already-checked legacy line cannot be
+matched reliably during the first sync after upgrading. Once the new marker has been written,
+future state is preserved. Propagation applies to checkbox calendars; bullet calendars still get
+the day annotation but have no completion state.
 
 ## Development
 

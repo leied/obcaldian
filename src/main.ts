@@ -5,6 +5,7 @@ import { ensureDailyNote } from "./dailyNote";
 import { autoSyncTick, syncAll, syncRange, syncSingleNote, type SyncOptions } from "./sync";
 import { migrateLegacySecrets, type AuthDeps } from "./googleAuth";
 import { SyncDaysModal } from "./syncDaysModal";
+import { confirmMultiDayCompletion } from "./multiDayCompletionModal";
 
 type SyncBarState =
 	| { kind: "idle" }
@@ -26,7 +27,7 @@ export default class ObcaldianPlugin extends Plugin {
 		this.statusBarItem = this.addStatusBarItem();
 		this.statusBarItem.addClass("obcaldian-status-bar-item");
 		this.statusBarItem.onClickEvent(() => {
-			void syncAll(this.app.vault, this.authDeps(), this.statusBarSyncOptions());
+			void syncAll(this.app.vault, this.authDeps(), this.syncOptions());
 		});
 		this.renderStatusBar();
 		// "synced Xm ago" goes stale as time passes without a resync; refresh its text periodically.
@@ -47,7 +48,7 @@ export default class ObcaldianPlugin extends Plugin {
 		this.addCommand({
 			id: "sync-calendars",
 			name: "Sync Google calendars now",
-			callback: () => syncAll(this.app.vault, this.authDeps(), this.statusBarSyncOptions()),
+			callback: () => syncAll(this.app.vault, this.authDeps(), this.syncOptions()),
 		});
 
 		this.addCommand({
@@ -63,7 +64,7 @@ export default class ObcaldianPlugin extends Plugin {
 			void this.openDailyNote(1);
 		});
 		this.addRibbonIcon("refresh-cw", "Sync Google calendars now", () => {
-			void syncAll(this.app.vault, this.authDeps(), this.statusBarSyncOptions());
+			void syncAll(this.app.vault, this.authDeps(), this.syncOptions());
 		});
 		this.addRibbonIcon("calendar-range", "Sync next N days...", () => {
 			this.openSyncDaysModal();
@@ -72,7 +73,7 @@ export default class ObcaldianPlugin extends Plugin {
 
 	private openSyncDaysModal(): void {
 		new SyncDaysModal(this.app, this.settings.syncDaysAhead, (days) => {
-			void syncRange(this.app.vault, this.authDeps(), days, this.statusBarSyncOptions());
+			void syncRange(this.app.vault, this.authDeps(), days, this.syncOptions());
 		}).open();
 	}
 
@@ -93,7 +94,7 @@ export default class ObcaldianPlugin extends Plugin {
 		const minutes = this.settings.autoSyncIntervalMinutes;
 		if (minutes > 0) {
 			const id = window.setInterval(() => {
-				void autoSyncTick(this.app.vault, this.authDeps(), this.statusBarSyncOptions());
+				void autoSyncTick(this.app.vault, this.authDeps(), this.syncOptions());
 			}, minutes * 60_000);
 			this.autoSyncIntervalId = id;
 			this.registerInterval(id);
@@ -101,8 +102,9 @@ export default class ObcaldianPlugin extends Plugin {
 	}
 
 	/** Callbacks that drive the status bar item from any sync call site (commands, modal, auto-sync). */
-	private statusBarSyncOptions(): SyncOptions {
+	syncOptions(): SyncOptions {
 		return {
+			confirmMultiDay: (request) => confirmMultiDayCompletion(this.app, request),
 			onStart: () => {
 				this.syncBarState = { kind: "syncing" };
 				this.renderStatusBar();

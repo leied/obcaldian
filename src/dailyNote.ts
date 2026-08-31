@@ -2,6 +2,12 @@ import { Notice, TFile, Vault, normalizePath } from "obsidian";
 import type { Moment } from "moment";
 import type { CalendarConfig, ObcaldianSettings } from "./settings";
 import type { GoogleEvent } from "./googleCalendar";
+import {
+	dayNumberInSpan,
+	multiDayEventKey,
+	multiDayEventMarker,
+	multiDaySpan,
+} from "./multiDay";
 
 const CALENDAR_TOKEN = "{calendar}";
 const MARKER_START = "<!-- obcaldian:calendar:start -->";
@@ -107,7 +113,9 @@ function formatTimeRange(ev: GoogleEvent, timeZone: string): string | null {
 export function renderCalendarBlock(
 	calendars: CalendarConfig[],
 	eventsByCalendar: Map<string, GoogleEvent[]>,
-	timeZone = Intl.DateTimeFormat().resolvedOptions().timeZone
+	timeZone = Intl.DateTimeFormat().resolvedOptions().timeZone,
+	renderDate?: string,
+	checkedEventKeys: ReadonlySet<string> = new Set()
 ): string {
 	const lines: string[] = [];
 	const footnotes: string[] = [];
@@ -119,20 +127,27 @@ export function renderCalendarBlock(
 		if (events.length === 0) continue;
 		lines.push(`**${cal.summary}**`);
 		for (const ev of events) {
-			const bullet = cal.addAs === "checkbox" ? "- [ ]" : "-";
+			const span = multiDaySpan(ev, timeZone);
+			const eventKey = span && ev.id ? multiDayEventKey(cal.id, ev.id) : null;
+			const checked = eventKey ? checkedEventKeys.has(eventKey) : false;
+			const bullet = cal.addAs === "checkbox" ? (checked ? "- [x]" : "- [ ]") : "-";
 			const time = formatTimeRange(ev, timeZone);
 			const rawTitle = ev.summary || "(untitled event)";
 			const title = ev.htmlLink ? `[${rawTitle}](${ev.htmlLink})` : rawTitle;
+			const dayNumber = span && renderDate ? dayNumberInSpan(renderDate, span) : null;
+			const dayLabel = dayNumber ? ` (Day ${dayNumber}/${span?.totalDays})` : "";
+			const identityMarker = eventKey ? ` ${multiDayEventMarker(eventKey)}` : "";
 
-			let marker = "";
+			let footnoteMarker = "";
 			const body = footnoteBody(ev);
 			if (body) {
 				footnoteCount += 1;
-				marker = `[^${footnoteCount}]`;
+				footnoteMarker = `[^${footnoteCount}]`;
 				footnotes.push(`[^${footnoteCount}]: ${body}`);
 			}
 
-			lines.push(time ? `${bullet} ${time} ${title}${marker}` : `${bullet} ${title}${marker}`);
+			const eventText = `${title}${dayLabel}${footnoteMarker}${identityMarker}`;
+			lines.push(time ? `${bullet} ${time} ${eventText}` : `${bullet} ${eventText}`);
 		}
 	}
 	if (lines.length === 0) {

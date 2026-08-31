@@ -190,6 +190,42 @@ export class ObcaldianSettingTab extends PluginSettingTab {
 
 		containerEl.createEl("h3", { text: "Sync" });
 		new Setting(containerEl)
+			.setName("When a multi-day event is checked")
+			.setDesc(
+				"Choose whether each day stays independent or completion carries into following days. Remembered choices also apply when a later note is first synced."
+			)
+			.addDropdown((dropdown) =>
+				dropdown
+					.addOption("independent", "Keep each day independent")
+					.addOption("ask", "Ask during manual sync")
+					.addOption("following", "Mark following days done")
+					.setValue(settings.multiDayCompletionBehavior)
+					.onChange(async (value) => {
+						settings.multiDayCompletionBehavior =
+							value as typeof settings.multiDayCompletionBehavior;
+						if (value === "independent") settings.multiDayCompletionRules = {};
+						await this.plugin.saveSettings();
+						this.display();
+					})
+			);
+
+		new Setting(containerEl)
+			.setName("Remembered multi-day completions")
+			.setDesc(
+				`${Object.keys(settings.multiDayCompletionRules).length} active rule(s). Clear these to stop applying prior “mark following” choices to notes synced later.`
+			)
+			.addButton((button) =>
+				button
+					.setButtonText("Clear")
+					.setDisabled(Object.keys(settings.multiDayCompletionRules).length === 0)
+					.onClick(async () => {
+						settings.multiDayCompletionRules = {};
+						await this.plugin.saveSettings();
+						this.display();
+					})
+			);
+
+		new Setting(containerEl)
 			.setName("Sync now")
 			.setDesc("Pull events from all enabled calendars into today's note and the configured days ahead.")
 			.addButton((btn) =>
@@ -197,7 +233,11 @@ export class ObcaldianSettingTab extends PluginSettingTab {
 					.setButtonText("Sync now")
 					.setCta()
 					.onClick(async () => {
-						await syncAll(this.app.vault, this.plugin.authDeps());
+						await syncAll(
+							this.app.vault,
+							this.plugin.authDeps(),
+							this.plugin.syncOptions()
+						);
 					})
 			);
 

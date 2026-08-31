@@ -8,6 +8,7 @@ import {
 	syncNoteCalendarSection,
 } from "../src/dailyNote";
 import type { GoogleEvent } from "../src/googleCalendar";
+import { multiDayEventKey, multiDayEventMarker } from "../src/multiDay";
 import { DEFAULT_SETTINGS } from "../src/settings";
 import { FakeVault } from "./fakeVault";
 
@@ -186,6 +187,26 @@ describe("renderCalendarBlock", () => {
 				"    Participants: a@example.com, b@example.com, c@example.com",
 				"[^2]: Sprint retro.",
 			].join("\n")
+		);
+	});
+
+	it("labels and preserves the checked state of a multi-day occurrence", () => {
+		const event: GoogleEvent = {
+			id: "conference-123",
+			summary: "Conference",
+			start: { date: "2026-07-21" },
+			end: { date: "2026-07-24" },
+		};
+		const key = multiDayEventKey("work", event.id!);
+		const block = renderCalendarBlock(
+			calendars,
+			new Map([["work", [event]]]),
+			"UTC",
+			"2026-07-22",
+			new Set([key])
+		);
+		expect(block).toBe(
+			`**Work**\n- [x] Conference (Day 2/3) ${multiDayEventMarker(key)}`
 		);
 	});
 });

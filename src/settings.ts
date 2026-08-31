@@ -1,4 +1,12 @@
 export type AddAsStyle = "checkbox" | "bullet";
+export type MultiDayCompletionBehavior = "independent" | "ask" | "following";
+
+export interface MultiDayCompletionRule {
+	/** First YYYY-MM-DD occurrence that should render checked. Earlier days stay unchanged. */
+	completedFrom: string;
+	/** Inclusive YYYY-MM-DD final occurrence, used to expire old rules. */
+	eventEnd: string;
+}
 
 export interface CalendarConfig {
 	id: string;
@@ -25,6 +33,10 @@ export interface ObcaldianSettings {
 	syncDaysAhead: number;
 	/** Minutes between automatic background syncs. 0 disables auto-sync. */
 	autoSyncIntervalMinutes: number;
+	/** How checking one occurrence of a multi-day event affects later occurrences. */
+	multiDayCompletionBehavior: MultiDayCompletionBehavior;
+	/** Persisted propagation rules ensure not-yet-synced dates are handled later. */
+	multiDayCompletionRules: Record<string, MultiDayCompletionRule>;
 }
 
 function detectSystemTimezone(): string {
@@ -45,4 +57,6 @@ export const DEFAULT_SETTINGS: ObcaldianSettings = {
 	syncDaysAhead: 1,
 	// Keep new installations reasonably fresh without polling Google aggressively.
 	autoSyncIntervalMinutes: 180,
+	multiDayCompletionBehavior: "ask",
+	multiDayCompletionRules: {},
 };

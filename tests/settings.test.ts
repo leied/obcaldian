@@ -14,6 +14,11 @@ describe("DEFAULT_SETTINGS", () => {
 		expect(DEFAULT_SETTINGS.autoSyncIntervalMinutes).toBe(180);
 	});
 
+	it("asks before propagating multi-day completion by default", () => {
+		expect(DEFAULT_SETTINGS.multiDayCompletionBehavior).toBe("ask");
+		expect(DEFAULT_SETTINGS.multiDayCompletionRules).toEqual({});
+	});
+
 	it("no longer carries a plaintext client secret or token fields", () => {
 		expect(DEFAULT_SETTINGS).not.toHaveProperty("googleClientSecret");
 		expect(DEFAULT_SETTINGS).not.toHaveProperty("tokens");

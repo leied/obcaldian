@@ -1,6 +1,17 @@
 # Plan: Multi-day event handling
 
-Status: proposed, not yet implemented. Written 2026-07-22.
+Status: implemented with the persisted-rule extension described below. Written 2026-07-22;
+implemented 2026-08-30.
+
+## Implemented policy options and unsynced dates
+
+The settings UI now offers `independent`, `ask`, and `following` policies. The original plan only
+resolved checkbox state for notes inside one sync run, which would lose the decision for a date
+outside that range. The implementation therefore persists accepted/automatic propagation as an
+event-keyed `{ completedFrom, eventEnd }` rule in plugin settings. A later occurrence renders
+checked when that date is eventually synced; the plugin does not eagerly create out-of-range notes.
+Rules expire 30 days after the event end and can be cleared from settings. Background sync never
+prompts and never creates a new rule in `ask` mode.
 
 ## Scope decisions (confirmed with user)
 
@@ -8,30 +19,34 @@ Status: proposed, not yet implemented. Written 2026-07-22.
   as-is for now (they get fully regenerated on every sync, same as today).
 - Multi-day events render on **every day they span**, annotated (e.g. `(Day 2/3)`) — not
   collapsed to a single line on the start day.
-- When a multi-day event's checkbox is checked on one day, sync **always prompts** (interactive
-  syncs only — see below) asking whether to mark it done across all the days it spans.
+- The user chooses independent dates, an interactive prompt, or automatic forward propagation.
+- Propagation starts on the earliest checked occurrence and affects following dates only; earlier
+  dates are never retroactively completed.
 
 ## 1. Detecting a multi-day event
 
-New helper in `dailyNote.ts` (or a new `multiDayEvent.ts`), pure and testable:
+The pure helper is implemented in `multiDay.ts`:
 
 ```ts
-function multiDaySpan(ev: GoogleEvent, timezone: string): { startDate: Moment; endDate: Moment; totalDays: number } | null
+function multiDaySpan(ev: GoogleEvent, timezone: string): MultiDaySpan | null
 ```
 
 - All-day events: `start.date`/`end.date` are present; Google's `end.date` is exclusive, so
   `totalDays = end.date - start.date` (in days). Multi-day when `totalDays > 1`.
-- Timed events: compare the *local calendar date* (in `settings.timezone`) of `start.dateTime` vs
-  `end.dateTime`. Different dates → multi-day (covers rare overnight events).
+- Timed events: compare the *local calendar date* (in `settings.timezone`) of `start.dateTime` with
+  the instant 1ms before `end.dateTime`. The subtraction prevents an exact-midnight end from
+  incorrectly claiming the next day.
 - Returns `null` for anything single-day — recurring daily events are naturally excluded since
   each instance's own start/end still spans one day.
 
 ## 2. Event identity
 
-`GoogleEvent` (`googleCalendar.ts:17`) needs an `id: string` field — Google already returns it,
-it's just not typed/used today. This `id` is what lets the plugin recognize "this is the same
+`GoogleEvent` includes Google's event-instance `id`. This ID is what lets the plugin recognize "this is the same
 multi-day event" across different daily notes and across sync runs (a single non-recurring event
 keeps one stable `id` no matter which day's window returns it).
+
+The internal key also includes the calendar ID so the same shared event shown through two enabled
+calendars does not accidentally share checkbox state.
 
 ## 3. Rendering changes
 
@@ -48,42 +63,36 @@ lines are byte-identical to today).
 
 ## 4. Sync flow restructuring (the real change)
 
-Today, `syncRange` (`sync.ts:52`) syncs one day at a time, independently, immediately overwriting
-each note's marker block. That can't support "check on Day 2 → propagate to Days 1/3," so
-multi-day handling needs a pre-pass before any writes happen:
+`syncRange` now uses a pre-pass before any writes happen:
 
-1. **Fetch phase (unchanged shape):** gather events per day/calendar as today.
+1. **Fetch phase:** gather every requested day/calendar. Any network failure aborts before writes.
 2. **Group phase:** collect events into multi-day groups by `id`, computing which of the
    days-in-range each group touches.
 3. **Scan phase:** for each multi-day group, read the *existing* content (if any) of every
-   touched day's note and check whether its rendered line (matched via the
+   day in the event's full span—not just the requested range—and check whether its line (matched via the
    `<!-- obcaldian:event:<id> -->` comment) is currently `- [x]`.
-4. **Decide phase:** if any day is checked and the group hasn't been resolved yet this run:
-   - **Interactive syncs only** (`notify: true` — manual "Sync now" / "Sync next N days"): show a
-     confirmation Modal, *"Mark '\<title\>' done on all 3 days?"* Yes/No.
-   - **Silent syncs** (`autoSyncTick`, `notify: false`): never block on a Modal with no one
-     watching — auto-preserve whatever's already checked, don't propagate, don't ask.
-   - Yes → every day-instance of that event renders checked this run.
-   - No → only the day(s) already checked stay checked; others render fresh/unchecked.
+4. **Decide phase:** apply the selected policy:
+   - `independent` → preserve only the dates already checked.
+   - `ask` + interactive sync → ask whether to mark the earliest checked date and following dates
+     done. Yes persists a rule; No preserves only existing states and asks again next manual sync.
+   - `ask` + background sync → preserve existing states without prompting or creating a rule.
+   - `following` → automatically persist a forward-propagation rule.
 5. **Render + write phase:** proceed per-day as today, but feed each multi-day line's resolved
    checked state into `renderCalendarBlock`.
 
 ## 5. Avoiding repeat prompts
 
-Before prompting, check whether the group is already "fully resolved" — i.e., every existing
-touched-day note already shows the same checked state. If so, skip the modal and just keep
-re-emitting that state. Only prompt when the existing notes disagree (some checked, some not) and
-no decision has been recorded yet this run. If a sync's date range doesn't cover the whole event
-(e.g. `daysAhead` cuts off before the event ends), later days get resolved/prompted when a future
-sync reaches them.
+Before prompting, the implementation checks whether every date from the earliest checked day to
+the end is already checked. If so, there is nothing to propagate. Once accepted, the persisted rule
+prevents repeat prompts and covers dates beyond the current sync range.
 
 ## 6. New/changed files
 
 - `src/googleCalendar.ts` — add `id` to `GoogleEvent`.
-- `src/dailyNote.ts` — multi-day detection helper, day-index rendering, invisible id-comment
-  marker, and a pure `scanExistingCheckedState(content, eventIds)` function (unit-testable, no
-  Obsidian Modal dependency).
-- `src/multiDayConfirmModal.ts` — new, small `Modal` (same shape as `syncDaysModal.ts`), returns
+- `src/multiDay.ts` — span calculation, day-index helpers, invisible marker identity, and pure
+  checkbox-state scanning.
+- `src/dailyNote.ts` — day-index and resolved checkbox rendering.
+- `src/multiDayCompletionModal.ts` — small `Modal` (same shape as `syncDaysModal.ts`), returns
   `Promise<boolean>`.
 - `src/sync.ts` — restructure `syncNoteForDate`/`syncRange` into the group → scan → decide →
   render pipeline above; thread the modal call in only for `notify: true` paths.
@@ -95,8 +104,8 @@ existing pattern (`dailyNote.test.ts`) without touching the untested Modal/netwo
 no prior state, one day checked, all days checked (no prompt needed), conflicting partial state,
 range not covering full event span.
 
-## Open questions for next time
+## Remaining limitation
 
-- Exact modal wording/UX.
-- Whether "No" should preserve just the single day that was checked, or reset everything back to
-  unchecked.
+An active persisted rule intentionally wins on the next sync, including over a manually unchecked
+later occurrence. To undo remembered propagation, use the Clear control in settings (or switch to
+independent mode, which clears all rules). A future per-event reset action could make this finer-grained.

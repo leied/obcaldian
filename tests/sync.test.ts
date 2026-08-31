@@ -2,9 +2,10 @@ import moment from "moment";
 import { Notice, SecretStorage } from "obsidian";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import type { AuthDeps } from "../src/googleAuth";
-import { listEventsForDay } from "../src/googleCalendar";
+import { listEventsForDay, type GoogleEvent } from "../src/googleCalendar";
 import { DEFAULT_SETTINGS } from "../src/settings";
-import { syncRange } from "../src/sync";
+import { multiDayEventKey, multiDayEventMarker } from "../src/multiDay";
+import { autoSyncTick, syncRange } from "../src/sync";
 import { FakeVault } from "./fakeVault";
 
 vi.mock("../src/googleCalendar", () => ({
@@ -13,7 +14,7 @@ vi.mock("../src/googleCalendar", () => ({
 
 function baseDeps(): AuthDeps {
 	return {
-		settings: { ...DEFAULT_SETTINGS },
+		settings: { ...DEFAULT_SETTINGS, multiDayCompletionRules: {} },
 		saveSettings: async () => {},
 		secretStorage: new SecretStorage(),
 	};
@@ -129,7 +130,7 @@ describe("syncRange status callbacks", () => {
 		expect(vault.contentOf(todayPath)).toBe(original);
 		expect(onSuccess).not.toHaveBeenCalled();
 		expect(onError).toHaveBeenCalledWith(
-			'Failed to fetch "Personal": network unavailable'
+			expect.stringMatching(/^Failed to fetch "Personal" for \d{4}-\d{2}-\d{2}: network unavailable$/)
 		);
 		expect(Notice.instances).toHaveLength(0);
 	});
@@ -153,5 +154,122 @@ describe("syncRange status callbacks", () => {
 			`Calendar markers not found in ${todayPath}; note was not changed.`
 		);
 		expect(Notice.instances).toHaveLength(0);
+	});
+});
+
+describe("multi-day completion behavior", () => {
+	function spanningEvent(): GoogleEvent {
+		return {
+			id: "trip-123",
+			summary: "Conference",
+			start: { date: moment().format("YYYY-MM-DD") },
+			end: { date: moment().add(3, "days").format("YYYY-MM-DD") },
+		};
+	}
+
+	async function vaultWithCheckedFirstDay(event: GoogleEvent): Promise<FakeVault> {
+		const vault = new FakeVault();
+		await vault.create("Templates/Daily.md", "{{date}}\n{calendar}\n");
+		const key = multiDayEventKey("work", event.id!);
+		await vault.create(
+			`${moment().format("YYYYMMDD")}.md`,
+			[
+				"<!-- obcaldian:calendar:start -->",
+				`- [x] Conference ${multiDayEventMarker(key)}`,
+				"<!-- obcaldian:calendar:end -->",
+			].join("\n")
+		);
+		return vault;
+	}
+
+	it("persists automatic following-day completion for a note synced later", async () => {
+		const event = spanningEvent();
+		const vault = await vaultWithCheckedFirstDay(event);
+		const deps = connectedDeps();
+		deps.settings.multiDayCompletionBehavior = "following";
+		deps.saveSettings = vi.fn(async () => {});
+		vi.mocked(listEventsForDay).mockResolvedValue([event]);
+
+		await syncRange(vault as never, deps, 1, { notify: false });
+
+		const key = multiDayEventKey("work", event.id!);
+		expect(deps.settings.multiDayCompletionRules[key]).toEqual({
+			completedFrom: moment().format("YYYY-MM-DD"),
+			eventEnd: moment().add(2, "days").format("YYYY-MM-DD"),
+		});
+		expect(vault.contentOf(`${moment().add(1, "day").format("YYYYMMDD")}.md`)).toContain(
+			"- [x] Conference (Day 2/3)"
+		);
+
+		// Day 3 did not exist during the first sync. The persisted rule applies when it is synced later.
+		await syncRange(vault as never, deps, 2, { notify: false });
+		expect(vault.contentOf(`${moment().add(2, "days").format("YYYYMMDD")}.md`)).toContain(
+			"- [x] Conference (Day 3/3)"
+		);
+		expect(deps.saveSettings).toHaveBeenCalled();
+	});
+
+	it("asks during manual sync and keeps days separate when declined", async () => {
+		const event = spanningEvent();
+		const vault = await vaultWithCheckedFirstDay(event);
+		const deps = connectedDeps();
+		deps.settings.multiDayCompletionBehavior = "ask";
+		vi.mocked(listEventsForDay).mockResolvedValue([event]);
+		const confirmMultiDay = vi.fn(async () => false);
+
+		await syncRange(vault as never, deps, 1, { confirmMultiDay });
+
+		expect(confirmMultiDay).toHaveBeenCalledWith(
+			expect.objectContaining({
+				title: "Conference",
+				completedFrom: moment().format("YYYY-MM-DD"),
+			})
+		);
+		expect(vault.contentOf(`${moment().add(1, "day").format("YYYYMMDD")}.md`)).toContain(
+			"- [ ] Conference (Day 2/3)"
+		);
+		expect(deps.settings.multiDayCompletionRules).toEqual({});
+
+		await syncRange(vault as never, deps, 1, { confirmMultiDay });
+		expect(confirmMultiDay).toHaveBeenCalledTimes(2);
+	});
+
+	it("remembers an accepted manual choice for following unsynced dates", async () => {
+		const event = spanningEvent();
+		const vault = await vaultWithCheckedFirstDay(event);
+		const deps = connectedDeps();
+		deps.settings.multiDayCompletionBehavior = "ask";
+		deps.saveSettings = vi.fn(async () => {});
+		vi.mocked(listEventsForDay).mockResolvedValue([event]);
+		const confirmMultiDay = vi.fn(async () => true);
+
+		await syncRange(vault as never, deps, 0, { confirmMultiDay });
+
+		const key = multiDayEventKey("work", event.id!);
+		expect(deps.settings.multiDayCompletionRules[key]?.completedFrom).toBe(
+			moment().format("YYYY-MM-DD")
+		);
+		expect(deps.settings.multiDayCompletionRules[key]?.eventEnd).toBe(
+			moment().add(2, "days").format("YYYY-MM-DD")
+		);
+		expect(deps.saveSettings).toHaveBeenCalledOnce();
+	});
+
+	it("never prompts or propagates an unconfirmed choice during background sync", async () => {
+		const event = spanningEvent();
+		const vault = await vaultWithCheckedFirstDay(event);
+		const deps = connectedDeps();
+		deps.settings.multiDayCompletionBehavior = "ask";
+		deps.settings.syncDaysAhead = 1;
+		vi.mocked(listEventsForDay).mockResolvedValue([event]);
+		const confirmMultiDay = vi.fn(async () => true);
+
+		await autoSyncTick(vault as never, deps, { confirmMultiDay });
+
+		expect(confirmMultiDay).not.toHaveBeenCalled();
+		expect(vault.contentOf(`${moment().add(1, "day").format("YYYYMMDD")}.md`)).toContain(
+			"- [ ] Conference (Day 2/3)"
+		);
+		expect(deps.settings.multiDayCompletionRules).toEqual({});
 	});
 });

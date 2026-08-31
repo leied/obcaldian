@@ -59,6 +59,22 @@ describe("renderCalendarBlock", () => {
 		expect(block).toBe("**Work**\n- [ ] 09:00-09:30 Standup");
 	});
 
+	it("renders timed events in the configured timezone", () => {
+		const events: GoogleEvent[] = [
+			{
+				summary: "Breakfast",
+				start: { dateTime: "2026-07-22T09:00:00Z" },
+				end: { dateTime: "2026-07-22T09:30:00Z" },
+			},
+		];
+		const block = renderCalendarBlock(
+			calendars,
+			new Map([["work", events]]),
+			"America/Los_Angeles"
+		);
+		expect(block).toBe("**Work**\n- [ ] 02:00-02:30 Breakfast");
+	});
+
 	it("collapses the range to a single time when start and end match", () => {
 		const events: GoogleEvent[] = [
 			{
@@ -210,6 +226,17 @@ describe("ensureDailyNote", () => {
 			/template/i
 		);
 	});
+
+	it("does not create a note when the template has no calendar token", async () => {
+		const vault = new FakeVault();
+		await vault.create("Templates/Daily.md", "# {{date}}\n\n## Notes\n");
+		const settings = { ...DEFAULT_SETTINGS, templatePath: "Templates/Daily.md" };
+
+		await expect(ensureDailyNote(vault as never, settings, DATE)).rejects.toThrow(
+			/Template must contain \{calendar\}/
+		);
+		expect(vault.contentOf("20260722.md")).toBeUndefined();
+	});
 });
 
 describe("syncNoteCalendarSection", () => {
@@ -251,5 +278,25 @@ describe("syncNoteCalendarSection", () => {
 
 		expect(ok).toBe(false);
 		expect(vault.contentOf("20260722.md")).toBe("no markers here");
+	});
+
+	it("matches the end marker after the start marker when an orphan end marker appears earlier", async () => {
+		const vault = new FakeVault();
+		const file = await vault.create(
+			"20260722.md",
+			[
+				"<!-- obcaldian:calendar:end -->",
+				"<!-- obcaldian:calendar:start -->",
+				"old block",
+				"<!-- obcaldian:calendar:end -->",
+			].join("\n")
+		);
+
+		const ok = await syncNoteCalendarSection(vault as never, file, "new block");
+
+		expect(ok).toBe(true);
+		expect(vault.contentOf("20260722.md")).toContain(
+			"<!-- obcaldian:calendar:start -->\nnew block\n<!-- obcaldian:calendar:end -->"
+		);
 	});
 });

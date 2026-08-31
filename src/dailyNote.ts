@@ -46,6 +46,9 @@ export async function ensureDailyNote(
 	}
 
 	const templateContent = await vault.read(templateFile);
+	if (!templateContent.includes(CALENDAR_TOKEN)) {
+		throw new Error(`Template must contain ${CALENDAR_TOKEN}: ${settings.templatePath}`);
+	}
 	const rendered = templateContent
 		.replace(/\{\{date\}\}/g, date.format("YYYY-MM-DD"))
 		.replace(CALENDAR_TOKEN, markerBlock(PLACEHOLDER_BODY));
@@ -83,16 +86,26 @@ function footnoteBody(ev: GoogleEvent): string | null {
 }
 
 /** Formats a timed event's start (and end, if distinct) as "HH:mm" or "HH:mm-HH:mm". Null for all-day events. */
-function formatTimeRange(ev: GoogleEvent): string | null {
+function formatTime(dateTime: string, timeZone: string): string {
+	return new Intl.DateTimeFormat("en-GB", {
+		timeZone,
+		hour: "2-digit",
+		minute: "2-digit",
+		hourCycle: "h23",
+	}).format(new Date(dateTime));
+}
+
+function formatTimeRange(ev: GoogleEvent, timeZone: string): string | null {
 	if (!ev.start.dateTime) return null;
-	const start = window.moment(ev.start.dateTime).format("HH:mm");
-	const end = ev.end.dateTime ? window.moment(ev.end.dateTime).format("HH:mm") : null;
+	const start = formatTime(ev.start.dateTime, timeZone);
+	const end = ev.end.dateTime ? formatTime(ev.end.dateTime, timeZone) : null;
 	return end && end !== start ? `${start}-${end}` : start;
 }
 
 export function renderCalendarBlock(
 	calendars: CalendarConfig[],
-	eventsByCalendar: Map<string, GoogleEvent[]>
+	eventsByCalendar: Map<string, GoogleEvent[]>,
+	timeZone = Intl.DateTimeFormat().resolvedOptions().timeZone
 ): string {
 	const lines: string[] = [];
 	const footnotes: string[] = [];
@@ -105,7 +118,7 @@ export function renderCalendarBlock(
 		lines.push(`**${cal.summary}**`);
 		for (const ev of events) {
 			const bullet = cal.addAs === "checkbox" ? "- [ ]" : "-";
-			const time = formatTimeRange(ev);
+			const time = formatTimeRange(ev, timeZone);
 			const rawTitle = ev.summary || "(untitled event)";
 			const title = ev.htmlLink ? `[${rawTitle}](${ev.htmlLink})` : rawTitle;
 
@@ -136,13 +149,17 @@ export function renderCalendarBlock(
 export async function syncNoteCalendarSection(
 	vault: Vault,
 	file: TFile,
-	renderedBlock: string
+	renderedBlock: string,
+	notify = true
 ): Promise<boolean> {
 	const content = await vault.read(file);
 	const startIdx = content.indexOf(MARKER_START);
-	const endIdx = content.indexOf(MARKER_END);
-	if (startIdx === -1 || endIdx === -1 || endIdx < startIdx) {
-		new Notice(`Obcaldian: calendar markers not found in ${file.path}, skipping.`);
+	const endIdx =
+		startIdx === -1 ? -1 : content.indexOf(MARKER_END, startIdx + MARKER_START.length);
+	if (startIdx === -1 || endIdx === -1) {
+		if (notify) {
+			new Notice(`Obcaldian: calendar markers not found in ${file.path}, skipping.`);
+		}
 		return false;
 	}
 	const before = content.slice(0, startIdx);

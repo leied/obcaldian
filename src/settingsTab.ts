@@ -54,21 +54,23 @@ export class ObcaldianSettingTab extends PluginSettingTab {
 					})
 			);
 
+		const timezoneDescription =
+			"IANA time zone (e.g. America/New_York) used to align each day's sync window with Google Calendar. Defaults to your system timezone.";
 		const timezoneSetting = new Setting(containerEl)
 			.setName("Timezone")
-			.setDesc(
-				"IANA time zone (e.g. America/New_York) used to align each day's sync window with Google Calendar. Defaults to your system timezone."
-			)
+			.setDesc(timezoneDescription)
 			.addText((text) =>
 				text.setValue(settings.timezone).onChange(async (value) => {
 					const trimmed = value.trim();
 					if (!isValidTimeZone(trimmed)) {
-						timezoneSetting.setErrorMessage(
+						timezoneSetting.setDesc(
 							"Not a recognized IANA time zone, e.g. America/New_York."
 						);
+						timezoneSetting.descEl.addClass("obcaldian-setting-error");
 						return;
 					}
-					timezoneSetting.setErrorMessage(null);
+					timezoneSetting.setDesc(timezoneDescription);
+					timezoneSetting.descEl.removeClass("obcaldian-setting-error");
 					settings.timezone = trimmed;
 					await this.plugin.saveSettings();
 				})

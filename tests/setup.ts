@@ -1,6 +1,5 @@
-// renderCalendarBlock formats event times via moment's local-zone display;
-// pin the process to UTC so those assertions don't depend on the machine
-// (or CI runner) running the tests.
+// Pin the process to UTC so default-timezone rendering assertions and date
+// fixtures don't depend on the machine (or CI runner) running the tests.
 process.env.TZ = "UTC";
 
 import moment from "moment";

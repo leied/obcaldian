@@ -2,6 +2,7 @@ import moment from "moment";
 import { Notice, SecretStorage } from "obsidian";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import type { AuthDeps } from "../src/googleAuth";
+import { listEventsForDay } from "../src/googleCalendar";
 import { DEFAULT_SETTINGS } from "../src/settings";
 import { syncRange } from "../src/sync";
 import { FakeVault } from "./fakeVault";
@@ -29,6 +30,7 @@ function connectedDeps(): AuthDeps {
 
 beforeEach(() => {
 	Notice.instances = [];
+	vi.mocked(listEventsForDay).mockReset().mockResolvedValue([]);
 });
 
 describe("syncRange notifications", () => {
@@ -98,5 +100,58 @@ describe("syncRange status callbacks", () => {
 		const onError = vi.fn();
 		await syncRange(vault as never, deps, 0, { notify: false, onError });
 		expect(onError).toHaveBeenCalledWith("Set a template file in Obcaldian settings first.");
+	});
+
+	it("does not overwrite a note or report success when one calendar fetch fails", async () => {
+		const vault = new FakeVault();
+		const todayPath = `${moment().format("YYYYMMDD")}.md`;
+		const original = [
+			"<!-- obcaldian:calendar:start -->",
+			"previous calendar content",
+			"<!-- obcaldian:calendar:end -->",
+		].join("\n");
+		await vault.create(todayPath, original);
+		const deps = connectedDeps();
+		deps.settings.calendars.push({
+			id: "personal",
+			summary: "Personal",
+			enabled: true,
+			addAs: "bullet",
+		});
+		vi.mocked(listEventsForDay)
+			.mockResolvedValueOnce([])
+			.mockRejectedValueOnce(new Error("network unavailable"));
+		const onSuccess = vi.fn();
+		const onError = vi.fn();
+
+		await syncRange(vault as never, deps, 0, { notify: false, onSuccess, onError });
+
+		expect(vault.contentOf(todayPath)).toBe(original);
+		expect(onSuccess).not.toHaveBeenCalled();
+		expect(onError).toHaveBeenCalledWith(
+			'Failed to fetch "Personal": network unavailable'
+		);
+		expect(Notice.instances).toHaveLength(0);
+	});
+
+	it("treats missing calendar markers as an error without leaking a background Notice", async () => {
+		const vault = new FakeVault();
+		const todayPath = `${moment().format("YYYYMMDD")}.md`;
+		await vault.create(todayPath, "user note without plugin markers");
+		const onSuccess = vi.fn();
+		const onError = vi.fn();
+
+		await syncRange(vault as never, connectedDeps(), 0, {
+			notify: false,
+			onSuccess,
+			onError,
+		});
+
+		expect(vault.contentOf(todayPath)).toBe("user note without plugin markers");
+		expect(onSuccess).not.toHaveBeenCalled();
+		expect(onError).toHaveBeenCalledWith(
+			`Calendar markers not found in ${todayPath}; note was not changed.`
+		);
+		expect(Notice.instances).toHaveLength(0);
 	});
 });

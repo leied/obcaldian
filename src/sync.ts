@@ -9,7 +9,6 @@ async function syncNoteForDate(
 	vault: Vault,
 	deps: AuthDeps,
 	date: Moment,
-	notify: boolean,
 	file?: TFile
 ) {
 	const settings = deps.settings;
@@ -21,17 +20,16 @@ async function syncNoteForDate(
 			const events = await listEventsForDay(deps, cal.id, date);
 			eventsByCalendar.set(cal.id, events);
 		} catch (e) {
-			if (notify) {
-				new Notice(`Obcaldian: failed to fetch "${cal.summary}": ${(e as Error).message}`);
-			} else {
-				console.error(`Obcaldian: background sync failed to fetch "${cal.summary}"`, e);
-			}
+			throw new Error(`Failed to fetch "${cal.summary}": ${(e as Error).message}`);
 		}
 	}
 
-	const block = renderCalendarBlock(settings.calendars, eventsByCalendar);
+	const block = renderCalendarBlock(settings.calendars, eventsByCalendar, settings.timezone);
 	const noteFile = file ?? (await ensureDailyNote(vault, settings, date));
-	await syncNoteCalendarSection(vault, noteFile, block);
+	const updated = await syncNoteCalendarSection(vault, noteFile, block, false);
+	if (!updated) {
+		throw new Error(`Calendar markers not found in ${noteFile.path}; note was not changed.`);
+	}
 }
 
 export interface SyncOptions {
@@ -75,7 +73,7 @@ export async function syncRange(
 
 	try {
 		for (let offset = 0; offset <= days; offset++) {
-			await syncNoteForDate(vault, deps, window.moment().add(offset, "day"), notify);
+			await syncNoteForDate(vault, deps, window.moment().add(offset, "day"));
 		}
 		const dayCount = days + 1;
 		if (notify) {
@@ -120,7 +118,7 @@ export async function syncSingleNote(
 	if (!isConnected(deps)) return;
 	if (deps.settings.calendars.filter((c) => c.enabled).length === 0) return;
 	try {
-		await syncNoteForDate(vault, deps, date, true, file);
+		await syncNoteForDate(vault, deps, date, file);
 	} catch (e) {
 		new Notice(`Obcaldian: initial calendar sync failed: ${(e as Error).message}`);
 	}

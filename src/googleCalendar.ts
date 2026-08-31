@@ -23,14 +23,41 @@ export interface GoogleEvent {
 	attendees?: GoogleEventAttendee[];
 }
 
+interface GoogleListResponse<T> {
+	items?: T[];
+	nextPageToken?: string;
+}
+
+async function getAllPages<T>(
+	url: string,
+	accessToken: string,
+	params: URLSearchParams = new URLSearchParams()
+): Promise<T[]> {
+	const items: T[] = [];
+	let pageToken: string | undefined;
+	do {
+		const pageParams = new URLSearchParams(params);
+		if (pageToken) pageParams.set("pageToken", pageToken);
+		const query = pageParams.toString();
+		const resp = await requestUrl({
+			url: query ? `${url}?${query}` : url,
+			method: "GET",
+			headers: { Authorization: `Bearer ${accessToken}` },
+		});
+		const data = resp.json as GoogleListResponse<T>;
+		items.push(...(data.items ?? []));
+		pageToken = data.nextPageToken;
+	} while (pageToken);
+	return items;
+}
+
 export async function listCalendars(deps: AuthDeps): Promise<GoogleCalendarListEntry[]> {
 	const accessToken = await getValidAccessToken(deps);
-	const resp = await requestUrl({
-		url: "https://www.googleapis.com/calendar/v3/users/me/calendarList",
-		method: "GET",
-		headers: { Authorization: `Bearer ${accessToken}` },
-	});
-	const items = (resp.json.items ?? []) as Array<{ id: string; summary: string }>;
+	const items = await getAllPages<{ id: string; summary: string }>(
+		"https://www.googleapis.com/calendar/v3/users/me/calendarList",
+		accessToken,
+		new URLSearchParams({ maxResults: "250" })
+	);
 	return items.map((i) => ({ id: i.id, summary: i.summary }));
 }
 
@@ -53,13 +80,11 @@ export async function listEventsForDay(
 		timeZone: deps.settings.timezone,
 		singleEvents: "true",
 		orderBy: "startTime",
+		maxResults: "2500",
 	});
-	const resp = await requestUrl({
-		url: `https://www.googleapis.com/calendar/v3/calendars/${encodeURIComponent(
-			calendarId
-		)}/events?${params.toString()}`,
-		method: "GET",
-		headers: { Authorization: `Bearer ${accessToken}` },
-	});
-	return (resp.json.items ?? []) as GoogleEvent[];
+	return getAllPages<GoogleEvent>(
+		`https://www.googleapis.com/calendar/v3/calendars/${encodeURIComponent(calendarId)}/events`,
+		accessToken,
+		params
+	);
 }

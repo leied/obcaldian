@@ -22,3 +22,7 @@
 .obcaldian-status-bar-item {
 	cursor: pointer;
 }
+
+.obcaldian-setting-error {
+	color: var(--text-error);
+}

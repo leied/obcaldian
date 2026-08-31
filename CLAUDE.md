@@ -34,12 +34,12 @@ type-checks it) so test fakes don't need to satisfy Obsidian's full interfaces e
 `obsidian` npm package ships types only, no runtime — `vitest.config.ts` aliases `"obsidian"` to
 `tests/mocks/obsidian.ts`, a minimal runtime stand-in (`TFile`, `Notice`, `SecretStorage`,
 `normalizePath`, a stub `requestUrl` that throws if actually called). `tests/setup.ts` pins
-`process.env.TZ = "UTC"` and stubs `window.moment` — both `dailyNote.ts`'s time formatting and any
-test fixture dates would otherwise depend on the machine's local timezone. `tests/fakeVault.ts` is
-an in-memory `Vault` fake used by `dailyNote.test.ts`. Network-calling functions
-(`connectGoogleAccount`, `listCalendars`, etc.) aren't unit tested — coverage focuses on the pure
-logic (`timezone.ts`, `dailyNote.ts`'s rendering/marker logic, `googleAuth.ts`'s secret-storage
-helpers and migration).
+`process.env.TZ = "UTC"` and stubs `window.moment` so default-timezone rendering and date fixtures
+don't depend on the machine's local timezone. `tests/fakeVault.ts` is an in-memory `Vault` fake used
+by `dailyNote.test.ts`. OAuth network calls aren't unit tested; Google Calendar pagination is tested
+with mocked `requestUrl` responses, and the remaining coverage focuses on pure logic
+(`timezone.ts`, `dailyNote.ts`'s rendering/marker logic, `googleAuth.ts`'s secret-storage helpers and
+migration).
 
 ## Architecture
 
@@ -74,11 +74,13 @@ Module responsibilities in `src/`, in dependency order:
 - **`googleCalendar.ts`** — thin wrappers around the Google Calendar v3 REST API
   (`listCalendars`, `listEventsForDay`) using Obsidian's `requestUrl` (not `fetch`, to avoid CORS).
   `listEventsForDay` builds its `timeMin`/`timeMax` from `zonedDayRange` and also passes `timeZone`
-  to the API. `GoogleEvent` includes `description`, `attendees`, and `htmlLink` (used for footnotes
-  and the event link) — all returned by the API by default, no extra `fields` param needed.
+  to the API. Both list endpoints follow Google's `nextPageToken` so results aren't truncated.
+  `GoogleEvent` includes `description`, `attendees`, and `htmlLink` (used for footnotes and the
+  event link) — all returned by the API by default, no extra `fields` param needed.
 - **`dailyNote.ts`** — note file logic with no network calls:
   - `ensureDailyNote` creates `YYYYMMDD.md` from the user's template if it doesn't exist yet
-    (never rewrites an existing note's body).
+    (never rewrites an existing note's body), and rejects a template missing `{calendar}` before
+    creating an unusable note.
   - The template supports a `{{date}}` placeholder and a literal `{calendar}` token, which gets
     replaced by an HTML-comment-delimited marker block
     (`<!-- obcaldian:calendar:start -->` / `...:end -->`).
@@ -87,8 +89,9 @@ Module responsibilities in `src/`, in dependency order:
     missing, it no-ops and shows a `Notice` rather than guessing where to insert.
   - `renderCalendarBlock` turns fetched events into markdown lines, respecting each calendar's
     `addAs` style (`"checkbox"` → `- [ ]`, `"bullet"` → `-`). The title becomes a markdown link when
-    `htmlLink` is present, and a time range (`formatTimeRange`) shows `HH:mm-HH:mm` when start and
-    end differ, collapsing to one `HH:mm` otherwise. Events with a description and/or 3+ attendees
+    `htmlLink` is present, and a time range (`formatTimeRange`) renders in the configured timezone
+    as `HH:mm-HH:mm` when start and end differ, collapsing to one `HH:mm` otherwise. Events with a
+    description and/or 3+ attendees
     get a `[^n]` marker with a markdown footnote definition appended at the end of the *same*
     rendered block (footnotes must live inside the marker-delimited section, since sync never
     touches anything outside it) — description first, then a `Participants:` line only once
@@ -104,6 +107,8 @@ Module responsibilities in `src/`, in dependency order:
   `autoSyncTick` is the same but silent, used by the background timer. `syncSingleNote` does one
   already-created note (used right after it's generated), always notifies, and does *not* take
   `SyncOptions` (it doesn't drive the status bar). All sync entry points gate on `isConnected(deps)`.
+  A failed calendar fetch aborts that day's write so an incomplete response cannot erase the
+  previous block, and missing markers are treated as a sync failure rather than success.
 - **`syncDaysModal.ts`** — a small `Modal` prompting for a day count, pre-filled from
   `settings.syncDaysAhead`, used by the "Sync next N days..." command for one-off ranges without
   touching the persisted default.
@@ -113,8 +118,9 @@ Module responsibilities in `src/`, in dependency order:
   client secret field is a `SecretComponent` (mounted via `Setting.addComponent`, since `Setting`
   has no `addSecret` shortcut) reading/writing through `getClientSecret`/`setClientSecret`, not
   `settings`. The Timezone field validates via `isValidTimeZone` on every change and uses
-  `Setting.setErrorMessage()` (Obsidian API 1.13+) to show an inline error instead of persisting a
-  bad value. Changing "Auto-sync interval (minutes)" calls `plugin.applyAutoSyncInterval()`
+  description styling compatible with the declared minimum Obsidian version to show an inline
+  error instead of persisting a bad value. Changing "Auto-sync interval (minutes)" calls
+  `plugin.applyAutoSyncInterval()`
   immediately so the new interval takes effect without a plugin reload.
 - **`main.ts`** — the `Plugin` entry point. Registers commands (open today/tomorrow, sync now, sync
   next N days) and a ribbon icon. Owns `authDeps()`, the single place that builds the `AuthDeps`

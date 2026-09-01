@@ -2,6 +2,7 @@ import moment from "moment";
 import { describe, expect, it } from "vitest";
 import {
 	ensureDailyNote,
+	eventIsCheckedInNote,
 	extractPreservedEvents,
 	fileNameFor,
 	notePathFor,
@@ -10,11 +11,14 @@ import {
 	templateFileFor,
 } from "../src/dailyNote";
 import type { GoogleEvent } from "../src/googleCalendar";
-import { multiDayEventKey, multiDayEventMarker } from "../src/multiDay";
+import { encodeEventKey, multiDayEventKey, multiDayEventMarker } from "../src/multiDay";
 import { DEFAULT_SETTINGS } from "../src/settings";
 import { FakeVault } from "./fakeVault";
 
 const DATE = moment("2026-07-22");
+/** The rendered event lines, dropping the identity index appended after them. */
+const eventLines = (block: string): string => block.split("\n\n<!-- dailycalsync:index")[0];
+
 const WORK_HEADING =
 	'<span class="dailycalsync-calendar-heading"><span class="dailycalsync-calendar-label dailycalsync-calendar-pexppc"></span>**Work**</span>';
 
@@ -285,9 +289,139 @@ describe("renderCalendarBlock", () => {
 			"2026-07-22",
 			new Set([key])
 		);
-		expect(block).toBe(
-			`${WORK_HEADING}\n- [x] Conference (Day 2/3) ${multiDayEventMarker(key)}`
+		expect(eventLines(block)).toBe(`${WORK_HEADING}\n- [x] Conference (Day 2/3)`);
+		expect(block).not.toContain("<!-- dailycalsync:event:");
+		expect(eventIsCheckedInNote(block, key)).toBe(true);
+		expect(eventIsCheckedInNote(block, multiDayEventKey("work", "other"))).toBe(false);
+	});
+
+	it("indexes identity once at the end of the block instead of on each event line", () => {
+		const events: GoogleEvent[] = [
+			{ id: "a-1", summary: "Standup", start: {}, end: {} },
+			{ id: "b-1", summary: "Retro", start: {}, end: {} },
+		];
+		const block = renderCalendarBlock(calendars, new Map([["work", events]]), "UTC");
+		expect(eventLines(block)).toBe(`${WORK_HEADING}\n- [ ] Standup\n- [ ] Retro`);
+		expect(block.split("<!-- dailycalsync:index")).toHaveLength(2);
+		expect([...extractPreservedEvents(block).keys()]).toEqual(["work::a-1", "work::b-1"]);
+	});
+
+	it("round-trips checkbox state and annotations through the index alone", () => {
+		const events: GoogleEvent[] = [
+			{ id: "a-1", summary: "Standup", start: {}, end: {} },
+			{ id: "b-1", summary: "Retro", start: {}, end: {} },
+		];
+		const first = renderCalendarBlock(calendars, new Map([["work", events]]), "UTC");
+		const edited = first
+			.replace("- [ ] Standup", "- [x] Standup bring the report")
+			.replace("- [ ] Retro", "- [ ] Retro\n  - user-authored detail");
+
+		const preserved = extractPreservedEvents(edited);
+		expect(preserved.get("work::a-1")).toMatchObject({
+			checked: true,
+			inlineAnnotation: "bring the report",
+		});
+		expect(preserved.get("work::b-1")?.nestedAnnotations).toEqual(["  - user-authored detail"]);
+
+		const second = renderCalendarBlock(
+			calendars,
+			new Map([["work", events]]),
+			"UTC",
+			undefined,
+			new Set(),
+			DEFAULT_SETTINGS.rendering,
+			preserved
 		);
+		expect(eventLines(second)).toBe(
+			[
+				WORK_HEADING,
+				"- [x] Standup bring the report",
+				"- [ ] Retro",
+				"  - user-authored detail",
+			].join("\n")
+		);
+	});
+
+	it("rescues the checkbox of an edited line by pairing what is left over", () => {
+		const events: GoogleEvent[] = [
+			{ id: "a-1", summary: "Standup", start: {}, end: {} },
+			{ id: "b-1", summary: "Retro", start: {}, end: {} },
+		];
+		const block = renderCalendarBlock(calendars, new Map([["work", events]]), "UTC");
+		const edited = block.replace("- [ ] Retro", "- [x] Weekly retro\n  - ask Dana");
+
+		const preserved = extractPreservedEvents(edited);
+		expect(preserved.get("work::a-1")?.checked).toBe(false);
+		expect(preserved.get("work::b-1")).toMatchObject({
+			checked: true,
+			inlineAnnotation: "",
+			nestedAnnotations: ["  - ask Dana"],
+		});
+	});
+
+	it("leaves everything unpaired when an edit is accompanied by a deletion", () => {
+		const events: GoogleEvent[] = [
+			{ id: "a-1", summary: "Standup", start: {}, end: {} },
+			{ id: "b-1", summary: "Retro", start: {}, end: {} },
+			{ id: "c-1", summary: "Demo", start: {}, end: {} },
+		];
+		const block = renderCalendarBlock(calendars, new Map([["work", events]]), "UTC");
+		const edited = block.replace("- [ ] Retro\n", "").replace("- [ ] Demo", "- [x] Product demo");
+
+		const preserved = extractPreservedEvents(edited);
+		expect(preserved.get("work::a-1")?.checked).toBe(false);
+		expect(preserved.has("work::b-1")).toBe(false);
+		expect(preserved.has("work::c-1")).toBe(false);
+	});
+
+	it("keeps the orphan notice from stacking up on a preserved annotation", () => {
+		const event: GoogleEvent = { id: "gone-1", summary: "Retro", start: {}, end: {} };
+		const first = renderCalendarBlock(calendars, new Map([["work", [event]]]), "UTC");
+		const annotated = first.replace("- [ ] Retro", "- [ ] Retro ask Dana");
+
+		// The event stops coming back, so its annotation is replayed as unmatched.
+		let block = renderCalendarBlock(
+			calendars,
+			new Map(),
+			"UTC",
+			undefined,
+			new Set(),
+			DEFAULT_SETTINGS.rendering,
+			extractPreservedEvents(annotated)
+		);
+		const orphaned = block;
+		block = renderCalendarBlock(
+			calendars,
+			new Map(),
+			"UTC",
+			undefined,
+			new Set(),
+			DEFAULT_SETTINGS.rendering,
+			extractPreservedEvents(block)
+		);
+		expect(block).toBe(orphaned);
+		expect(block.split("Event no longer returned")).toHaveLength(2);
+		expect(block).toContain("- [ ] Retro ask Dana");
+	});
+
+	it("does not mistake one event's line for a repeated title on another calendar", () => {
+		const both = [
+			{ id: "x", summary: "Work", enabled: true, addAs: "checkbox" as const },
+			{ id: "personal", summary: "Personal", enabled: true, addAs: "checkbox" as const },
+		];
+		const shared: GoogleEvent[] = [{ id: "dup", summary: "Quarter break", start: {}, end: {} }];
+		const block = renderCalendarBlock(
+			both,
+			new Map([
+				["x", shared],
+				["personal", shared],
+			]),
+			"UTC"
+		);
+		const edited = block.replace("- [ ] Quarter break", "- [x] Quarter break");
+		const preserved = extractPreservedEvents(edited);
+		expect(preserved.get("x::dup")?.checked).toBe(true);
+		expect(preserved.get("personal::dup")?.checked).toBe(false);
 	});
 
 	it("preserves checkbox state and attached annotations for a single-day event", () => {
@@ -313,8 +447,9 @@ describe("renderCalendarBlock", () => {
 			DEFAULT_SETTINGS.rendering,
 			extractPreservedEvents(previous)
 		);
-		expect(block).toContain(`- [x] 09:00-09:30 Standup ${multiDayEventMarker(key)} follow up with Alice`);
+		expect(block).toContain("- [x] 09:00-09:30 Standup follow up with Alice");
 		expect(block).toContain("  - user-authored detail");
+		expect(block).toContain(`${encodeEventKey(key)} `);
 	});
 
 	it("escapes event Markdown and rejects non-Google event links", () => {
@@ -328,7 +463,9 @@ describe("renderCalendarBlock", () => {
 		const block = renderCalendarBlock(calendars, new Map([["work", [event]]]));
 		expect(block).not.toContain("](javascript:");
 		expect(block).not.toContain("<!-- dailycalsync:calendar:end -->");
-		expect(block).toContain(multiDayEventMarker(multiDayEventKey("work", event.id!)));
+		expect(block).toContain(
+			encodeEventKey(multiDayEventKey("work", event.id!))
+		);
 	});
 
 	it("redacts private event details when configured", () => {

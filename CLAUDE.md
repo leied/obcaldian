@@ -114,7 +114,10 @@ Module responsibilities in `src/`, in dependency order:
 - **`multiDay.ts`** — pure date-span and canonical event-identity logic. Recurring keys combine
   calendar, series, and immutable original-start identity. All-day `end.date` is treated as
   exclusive; timed spans use the configured timezone and subtract 1ms from the end so an exact
-  midnight end doesn't claim the next day. Event markers combine calendar ID and Google event ID.
+  midnight end doesn't claim the next day. Event keys combine calendar ID and Google event ID;
+  `encodeEventKey` escapes hyphens so a key stays safe inside an HTML comment, and
+  `multiDayEventMarker`/`eventKeyFromMarkerLine` remain only to read the per-line markers older
+  versions wrote.
 - **`dailyNote.ts`** — note file logic with no network calls:
   - `ensureDailyNote` creates `YYYYMMDD.md` from the user's template if it doesn't exist yet
     (never rewrites an existing note's body), and rejects a template missing `{calendar}` before
@@ -141,9 +144,20 @@ Module responsibilities in `src/`, in dependency order:
     and muted by `styles.css`), and consecutive calendars are separated by a blank line — without
     it Markdown folds the next heading and its events into the previous calendar's list as a lazy
     continuation, which breaks indentation in Live Preview.
-  - Every identified event has an invisible marker. Rendering parses and reattaches checkbox state,
-    same-line annotation text, and indented annotation lines; deleted/filtered annotations remain
-    visible as unmatched rather than being discarded.
+  - Event identity lives in one `<!-- dailycalsync:index ... -->` comment at the very end of the
+    block, never on the event lines themselves — Obsidian reveals a comment as soon as the cursor
+    reaches its line, so a per-line marker sat in the reader's way. Each row is
+    `<encoded key> <generated length> <digest>`: the length marks where this plugin's text stops
+    and a user's inline annotation begins, and the FNV digest confirms the line is still that
+    event before its state is reused. Lines are matched longest-digest-first and each entry is
+    claimed once, so an event repeated across two calendars resolves in render order. Notes from
+    older versions are still read through their inline markers.
+  - Rendering parses and reattaches checkbox state, same-line annotation text, and indented
+    annotation lines; deleted/filtered annotations remain visible as unmatched rather than being
+    discarded. Editing an event's own generated text breaks its digest; when exactly as many lines
+    are unrecognized as entries are unclaimed, order pairs them so the checkbox and sub-notes
+    survive (the edited text itself does not, since the boundary is gone). Mismatched counts stay
+    unpaired rather than risk attaching state to the wrong event.
   - Rendering escapes Markdown and marker lookalikes, validates URLs, supports privacy/type/free-busy
     filters, and applies configurable details, time format, ordering, and CSS color classes.
 - **`sync.ts`** — the serialized sync coordinator. It refreshes each enabled calendar once, builds

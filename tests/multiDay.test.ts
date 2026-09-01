@@ -3,7 +3,7 @@ import type { GoogleEvent } from "../src/googleCalendar";
 import {
 	dayNumberInSpan,
 	eventOccurrenceKey,
-	isMultiDayEventChecked,
+	eventKeyFromMarkerLine,
 	multiDayEventKey,
 	multiDayEventMarker,
 	multiDaySpan,
@@ -49,12 +49,10 @@ describe("multiDaySpan", () => {
 });
 
 describe("multi-day event identity", () => {
-	it("recognizes a checked marker without confusing a different event", () => {
+	it("keeps a key with hyphens intact inside a legacy comment marker", () => {
 		const key = multiDayEventKey("work@example.com", "event--123");
-		const content = `- [x] Conference ${multiDayEventMarker(key)}`;
-		expect(isMultiDayEventChecked(content, key)).toBe(true);
-		expect(isMultiDayEventChecked(content, multiDayEventKey("work", "other"))).toBe(false);
 		expect(multiDayEventMarker(key)).not.toContain("--123");
+		expect(eventKeyFromMarkerLine(`- [x] Conference ${multiDayEventMarker(key)}`)).toBe(key);
 	});
 
 	it("uses immutable original start time when a recurring instance moves", () => {

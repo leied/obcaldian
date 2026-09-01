@@ -91,29 +91,31 @@ export function eventOccurrenceKey(calendarId: string, event: GoogleEvent): stri
 		: multiDayEventKey(calendarId, eventId);
 }
 
+/** Escapes hyphens too, so a key survives inside an HTML comment even when it contains "--". */
+export function encodeEventKey(eventKey: string): string {
+	return encodeURIComponent(eventKey).replace(/-/g, "%2D");
+}
+
+export function decodeEventKey(encoded: string): string | null {
+	try {
+		return decodeURIComponent(encoded);
+	} catch {
+		return null;
+	}
+}
+
+/**
+ * Legacy per-event marker. Current renders index every event once at the end of
+ * the block instead (see `dailyNote.ts`), but notes written by older versions
+ * still carry these and are read back through `eventKeyFromMarkerLine`.
+ */
 export function multiDayEventMarker(eventKey: string): string {
-	// Escape hyphens too, keeping the HTML comment body valid even for IDs containing "--".
-	const encoded = encodeURIComponent(eventKey).replace(/-/g, "%2D");
-	return `<!-- dailycalsync:event:${encoded} -->`;
+	return `<!-- dailycalsync:event:${encodeEventKey(eventKey)} -->`;
 }
 
 export const eventMarker = multiDayEventMarker;
 
 export function eventKeyFromMarkerLine(line: string): string | null {
 	const match = line.match(/<!-- (?:dailycalsync|obcaldian):event:([^\s]+) -->/);
-	if (!match) return null;
-	try {
-		return decodeURIComponent(match[1]);
-	} catch {
-		return null;
-	}
-}
-
-/** Reads a checkbox state only from the event's own invisible marker line. */
-export function isMultiDayEventChecked(content: string, eventKey: string): boolean {
-	const encoded = encodeURIComponent(eventKey).replace(/-/g, "%2D");
-	const markers = [multiDayEventMarker(eventKey), `<!-- obcaldian:event:${encoded} -->`];
-	return content
-		.split("\n")
-		.some((line) => markers.some((marker) => line.includes(marker)) && /^\s*- \[[xX]\]/.test(line));
+	return match ? decodeEventKey(match[1]) : null;
 }

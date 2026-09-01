@@ -14,6 +14,7 @@ import {
 } from "./googleCalendar";
 import {
 	calendarSectionFromContent,
+	eventIsCheckedInNote,
 	eventIsIncluded,
 	extractPreservedEvents,
 	notePathFor,
@@ -26,7 +27,6 @@ import {
 	datesInSpan,
 	eventOccurrenceKey,
 	eventStartDate,
-	isMultiDayEventChecked,
 	multiDaySpan,
 	shiftDate,
 	type MultiDaySpan,
@@ -330,7 +330,7 @@ async function resolveCheckedEvents(
 		const checkedDates: string[] = [];
 		for (const dateKey of spanDates) {
 			const content = await readDate(dateKey);
-			if (content && isMultiDayEventChecked(content, group.eventKey)) checkedDates.push(dateKey);
+			if (content && eventIsCheckedInNote(content, group.eventKey)) checkedDates.push(dateKey);
 		}
 		let rule =
 			settings.multiDayCompletionBehavior === "independent" ? undefined : rules[group.eventKey];

@@ -51,7 +51,7 @@ export class OnboardingModal extends Modal {
 	private renderWelcome(): void {
 		this.contentEl.createEl("h2", { text: "Calendar sync that respects your notes" });
 		this.contentEl.createEl("p", { text: "DailyCalSync writes only inside its managed calendar markers. Existing prose stays untouched, and manual syncs show a preview before writing." });
-		this.contentEl.createEl("p", { text: "You can connect one or more Google accounts, add read-only Secret iCalendar feeds, or use both." });
+		this.contentEl.createEl("p", { text: "Start with one Google account, a read-only Secret iCalendar feed, or both. You can add more Google accounts later if you need them." });
 		this.contentEl.createEl("p", { text: "Credentials, refresh tokens, and Secret iCal URLs are stored in Obsidian SecretStorage. There is no analytics or publisher service." });
 	}
 
@@ -84,12 +84,22 @@ export class OnboardingModal extends Modal {
 	private renderSources(): void {
 		const settings = this.plugin.settings;
 		this.contentEl.createEl("h2", { text: "Add calendar sources" });
-		new Setting(this.contentEl).setName("Google account").setDesc("Creates an isolated profile. Import its Desktop OAuth JSON and connect from the settings page after this wizard.").addButton((button) => button.setButtonText("Add Google profile").onClick(async () => {
-			settings.googleAccounts.push({ id: localId("google"), name: `Google account ${settings.googleAccounts.length + 1}`, clientId: "", projectId: "", calendars: [], calendarHealth: {}, calendarCaches: {} });
-			await this.plugin.saveSettings();
-			new Notice("DailyCalSync: Google profile added.");
-			this.render();
-		}));
+		const hasGoogleProfile = settings.googleAccounts.length > 0;
+		new Setting(this.contentEl)
+			.setName("Google account")
+			.setDesc(hasGoogleProfile
+				? "Your first Google profile is ready to configure. Add more later from DailyCalSync settings if needed."
+				: "Creates one isolated profile. Import its Desktop OAuth JSON and connect from the settings page after this wizard.")
+			.addButton((button) => button
+				.setButtonText(hasGoogleProfile ? "Profile added" : "Add Google profile")
+				.setDisabled(hasGoogleProfile)
+				.onClick(async () => {
+					if (settings.googleAccounts.length > 0) return;
+					settings.googleAccounts.push({ id: localId("google"), name: "Google account", clientId: "", projectId: "", calendars: [], calendarHealth: {}, calendarCaches: {} });
+					this.render();
+					await this.plugin.saveSettings();
+					new Notice("DailyCalSync: Google profile added. You can add more later from settings.");
+				}));
 		new Setting(this.contentEl).setName("iCalendar feed name").addText((text) => text.setValue(this.iCalName).onChange((value) => {
 			this.iCalName = value;
 		}));

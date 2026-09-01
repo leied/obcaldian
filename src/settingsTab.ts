@@ -1,12 +1,15 @@
-import { App, Modal, Notice, PluginSettingTab, SecretComponent, Setting } from "obsidian";
+import { App, Notice, PluginSettingTab, SecretComponent, Setting } from "obsidian";
 import type DailyCalSyncPlugin from "./main";
 import {
+	clearGoogleAccountTokens,
 	connectGoogleAccount,
 	disconnectGoogleAccount,
 	getClientSecret,
 	importGoogleCredentials,
 	isConnected,
+	revokeGoogleToken,
 	setClientSecret,
+	type AuthDeps,
 } from "./googleAuth";
 import { listCalendars } from "./googleCalendar";
 import { clearICalUrl, getICalUrl, setICalUrl } from "./ical";
@@ -25,33 +28,9 @@ function localId(prefix: string): string {
 	return `${prefix}-${random.toLowerCase().replace(/[^a-z0-9-]/g, "").slice(0, 48)}`;
 }
 
-class ConfirmRemovalModal extends Modal {
-	constructor(
-		app: App,
-		private readonly label: string,
-		private readonly confirm: () => Promise<void>
-	) {
-		super(app);
-	}
-
-	onOpen(): void {
-		this.titleEl.setText("Confirm removal");
-		this.contentEl.createEl("p", { text: `Remove ${this.label}? Existing Markdown will not be deleted.` });
-		new Setting(this.contentEl)
-			.addButton((button) => button.setButtonText("Cancel").onClick(() => this.close()))
-			.addButton((button) => button.setButtonText("Remove").setWarning().onClick(async () => {
-				this.close();
-				await this.confirm();
-			}));
-	}
-
-	onClose(): void {
-		this.contentEl.empty();
-	}
-}
-
 export class DailyCalSyncSettingTab extends PluginSettingTab {
 	private connectionAbortController: AbortController | null = null;
+	private pendingRemovalId: string | null = null;
 
 	constructor(app: App, public readonly plugin: DailyCalSyncPlugin) {
 		super(app, plugin);
@@ -151,15 +130,35 @@ export class DailyCalSyncSettingTab extends PluginSettingTab {
 
 	private renderGoogleAccounts(): void {
 		const settings = this.plugin.settings;
+		const unfinishedAccount = settings.googleAccounts.find((account) =>
+			!account.clientId || !getClientSecret(this.plugin.authDeps(account.id))
+		);
+		const hasAccount = settings.googleAccounts.length > 0;
 		new Setting(this.containerEl).setName("Google accounts").setHeading();
 		new Setting(this.containerEl)
-			.setName("Add account")
-			.setDesc("Each profile has isolated credentials, tokens, calendars, cache, and health state.")
-			.addButton((button) => button.setButtonText("Add Google account").setCta().onClick(async () => {
-				settings.googleAccounts.push({ id: localId("google"), name: `Google account ${settings.googleAccounts.length + 1}`, clientId: "", projectId: "", calendars: [], calendarHealth: {}, calendarCaches: {} });
-				await this.plugin.saveSettings();
-				this.display();
-			}));
+			.setName(hasAccount ? "Need another Google account?" : "Add your Google account")
+			.setDesc(unfinishedAccount
+				? `Finish importing credentials for ${unfinishedAccount.name} before adding another account.`
+				: hasAccount
+					? "Add another only if you sync calendars from a different Google login. Each account remains isolated."
+					: "Start with one account. You can add more later if you need them.")
+			.addButton((button) => button
+				.setButtonText(hasAccount ? "Add another account" : "Add Google account")
+				.setDisabled(unfinishedAccount !== undefined)
+				.setCta()
+				.onClick(async () => {
+					const stillUnfinished = settings.googleAccounts.find((account) =>
+						!account.clientId || !getClientSecret(this.plugin.authDeps(account.id))
+					);
+					if (stillUnfinished) {
+						new Notice(`DailyCalSync: finish setting up ${stillUnfinished.name} before adding another account.`);
+						this.display();
+						return;
+					}
+					settings.googleAccounts.push({ id: localId("google"), name: `Google account ${settings.googleAccounts.length + 1}`, clientId: "", projectId: "", calendars: [], calendarHealth: {}, calendarCaches: {} });
+					this.display();
+					await this.plugin.saveSettings();
+				}));
 
 		if (settings.googleAccounts.length === 0) this.containerEl.createEl("p", { text: "No Google accounts yet. Add one, import its Desktop OAuth JSON, then connect.", cls: "dailycalsync-status" });
 		for (const account of settings.googleAccounts) this.renderGoogleAccount(account);
@@ -229,16 +228,32 @@ export class DailyCalSyncSettingTab extends PluginSettingTab {
 			this.display();
 		}));
 		this.renderCalendarRows(account.calendars, async () => this.plugin.saveSettings());
-		new Setting(this.containerEl).setName("Remove profile").setDesc("Revokes the token when possible, then clears this profile's local secrets and cache.").addButton((button) => button.setButtonText("Remove").setWarning().onClick(() => {
-			new ConfirmRemovalModal(this.app, account.name, async () => {
-				await disconnectGoogleAccount(deps);
-				setClientSecret(deps, "");
-				const index = this.plugin.settings.googleAccounts.indexOf(account);
-				if (index >= 0) this.plugin.settings.googleAccounts.splice(index, 1);
-				await this.plugin.saveSettings();
-				this.display();
-			}).open();
-		}));
+		const removalId = `google:${account.id}`;
+		const removal = new Setting(this.containerEl)
+			.setName("Remove profile")
+			.setDesc(this.pendingRemovalId === removalId
+				? `Remove ${account.name}? Existing Markdown will not be deleted.`
+				: "Revokes the token when possible, then clears this profile's local secrets and cache.");
+		if (this.pendingRemovalId === removalId) {
+			removal
+				.addButton((button) => button.setButtonText("Cancel").onClick(() => {
+					this.pendingRemovalId = null;
+					this.display();
+				}))
+				.addButton((button) => button.setButtonText("Confirm remove").setWarning().onClick(() => {
+					button.setButtonText("Removing…").setDisabled(true);
+					void this.removeGoogleAccount(account, deps);
+				}));
+		} else {
+			removal.addButton((button) => button
+				.setButtonText("Remove")
+				.setWarning()
+				.setDisabled(this.connectionAbortController !== null)
+				.onClick(() => {
+					this.pendingRemovalId = removalId;
+					this.display();
+				}));
+		}
 	}
 
 	private renderICalFeeds(): void {
@@ -273,15 +288,28 @@ export class DailyCalSyncSettingTab extends PluginSettingTab {
 				});
 			});
 			this.renderCalendarRows([calendar], async () => this.plugin.saveSettings(), false);
-			new Setting(this.containerEl).setName("Remove feed").addButton((button) => button.setButtonText("Remove").setWarning().onClick(() => {
-				new ConfirmRemovalModal(this.app, calendar.summary, async () => {
-					clearICalUrl(this.plugin.authDeps(), calendar.id);
-					delete settings.iCalCaches[calendar.id];
-					settings.iCalCalendars = settings.iCalCalendars.filter((candidate) => candidate !== calendar);
-					await this.plugin.saveSettings();
+			const removalId = `ical:${calendar.id}`;
+			const removal = new Setting(this.containerEl)
+				.setName("Remove feed")
+				.setDesc(this.pendingRemovalId === removalId
+					? `Remove ${calendar.summary}? Existing Markdown will not be deleted.`
+					: "Clears the feed URL and cached events from this device.");
+			if (this.pendingRemovalId === removalId) {
+				removal
+					.addButton((button) => button.setButtonText("Cancel").onClick(() => {
+						this.pendingRemovalId = null;
+						this.display();
+					}))
+					.addButton((button) => button.setButtonText("Confirm remove").setWarning().onClick(() => {
+						button.setButtonText("Removing…").setDisabled(true);
+						void this.removeICalFeed(calendar);
+					}));
+			} else {
+				removal.addButton((button) => button.setButtonText("Remove").setWarning().onClick(() => {
+					this.pendingRemovalId = removalId;
 					this.display();
-				}).open();
-			}));
+				}));
+			}
 		}
 	}
 
@@ -310,6 +338,41 @@ export class DailyCalSyncSettingTab extends PluginSettingTab {
 					this.display();
 				}));
 			}
+		}
+	}
+
+	private async removeGoogleAccount(account: GoogleAccountProfile, deps: AuthDeps): Promise<void> {
+		try {
+			const refreshToken = clearGoogleAccountTokens(deps);
+			setClientSecret(deps, "");
+			const index = this.plugin.settings.googleAccounts.indexOf(account);
+			if (index < 0) throw new Error("This profile was already removed.");
+			this.plugin.settings.googleAccounts.splice(index, 1);
+			this.pendingRemovalId = null;
+			await this.plugin.saveSettings();
+			this.display();
+			new Notice(`DailyCalSync: removed ${account.name}.`);
+			void revokeGoogleToken(refreshToken);
+		} catch (error) {
+			new Notice(`DailyCalSync: could not remove ${account.name} — ${(error as Error).message}`);
+			this.display();
+		}
+	}
+
+	private async removeICalFeed(calendar: CalendarConfig): Promise<void> {
+		try {
+			clearICalUrl(this.plugin.authDeps(), calendar.id);
+			delete this.plugin.settings.iCalCaches[calendar.id];
+			const index = this.plugin.settings.iCalCalendars.indexOf(calendar);
+			if (index < 0) throw new Error("This feed was already removed.");
+			this.plugin.settings.iCalCalendars.splice(index, 1);
+			this.pendingRemovalId = null;
+			await this.plugin.saveSettings();
+			this.display();
+			new Notice(`DailyCalSync: removed ${calendar.summary}.`);
+		} catch (error) {
+			new Notice(`DailyCalSync: could not remove ${calendar.summary} — ${(error as Error).message}`);
+			this.display();
 		}
 	}
 

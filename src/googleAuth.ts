@@ -190,6 +190,36 @@ export function isConnected(deps: AuthDeps): boolean {
 	return account.tokenExpiresAt !== undefined && Boolean(deps.secretStorage.getSecret(accountSecretKey(account.id, "refresh-token")));
 }
 
+/** Clears every locally stored token for an account and returns the former refresh token for optional revocation. */
+export function clearGoogleAccountTokens(deps: AuthDeps): string {
+	const account = googleAccount(deps);
+	const refreshToken = deps.secretStorage.getSecret(accountSecretKey(account.id, "refresh-token")) ?? "";
+	deps.secretStorage.setSecret(accountSecretKey(account.id, "access-token"), "");
+	deps.secretStorage.setSecret(accountSecretKey(account.id, "refresh-token"), "");
+	account.tokenExpiresAt = undefined;
+	return refreshToken;
+}
+
+/** Best-effort remote revocation. Local removal must never wait for this request. */
+export async function revokeGoogleToken(refreshToken: string): Promise<boolean> {
+	if (!refreshToken) return false;
+	try {
+		const response = await googleRequest(
+			{
+				url: "https://oauth2.googleapis.com/revoke",
+				method: "POST",
+				contentType: "application/x-www-form-urlencoded",
+				body: new URLSearchParams({ token: refreshToken }).toString(),
+				throw: false,
+			},
+			{ maxAttempts: 1 }
+		);
+		return response.status >= 200 && response.status < 300;
+	} catch {
+		return false;
+	}
+}
+
 async function receiveAuthorizationCode(clientId: string, state: string, codeChallenge: string, options: ConnectOptions): Promise<{ code: string; redirectUri: string }> {
 	if (!Platform.isDesktop) throw new Error("Google OAuth connection is available on desktop only.");
 	const redirectUri = `http://127.0.0.1:${REDIRECT_PORT}${CALLBACK_PATH}`;
@@ -276,22 +306,9 @@ export async function connectGoogleAccount(deps: AuthDeps, options: ConnectOptio
 }
 
 export async function disconnectGoogleAccount(deps: AuthDeps, revoke = true): Promise<boolean> {
-	const account = googleAccount(deps);
-	const refreshToken = deps.secretStorage.getSecret(accountSecretKey(account.id, "refresh-token"));
-	let revoked = false;
-	if (revoke && refreshToken) {
-		try {
-			const response = await googleRequest({ url: "https://oauth2.googleapis.com/revoke", method: "POST", contentType: "application/x-www-form-urlencoded", body: new URLSearchParams({ token: refreshToken }).toString(), throw: false });
-			revoked = response.status >= 200 && response.status < 300;
-		} catch {
-			// Local disconnect still succeeds while offline.
-		}
-	}
-	deps.secretStorage.setSecret(accountSecretKey(account.id, "access-token"), "");
-	deps.secretStorage.setSecret(accountSecretKey(account.id, "refresh-token"), "");
-	account.tokenExpiresAt = undefined;
+	const refreshToken = clearGoogleAccountTokens(deps);
 	await deps.saveSettings();
-	return revoked;
+	return revoke ? revokeGoogleToken(refreshToken) : false;
 }
 
 async function refreshAccessToken(deps: AuthDeps): Promise<string> {

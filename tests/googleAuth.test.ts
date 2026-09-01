@@ -1,6 +1,7 @@
 import { SecretStorage } from "obsidian";
 import { describe, expect, it } from "vitest";
 import {
+	clearGoogleAccountTokens,
 	getClientSecret,
 	isConnected,
 	migrateLegacySecrets,
@@ -74,6 +75,19 @@ describe("isConnected", () => {
 		const deps = makeDeps(Date.now() + 3600_000);
 		deps.secretStorage.setSecret(`dailycalsync-google-${ACCOUNT_ID}-refresh-token`, "refresh-token-value");
 		expect(isConnected(deps)).toBe(true);
+	});
+});
+
+describe("local token removal", () => {
+	it("clears tokens synchronously and returns the refresh token for background revocation", () => {
+		const deps = makeDeps(Date.now() + 3600_000);
+		deps.secretStorage.setSecret(`dailycalsync-google-${ACCOUNT_ID}-access-token`, "access-token-value");
+		deps.secretStorage.setSecret(`dailycalsync-google-${ACCOUNT_ID}-refresh-token`, "refresh-token-value");
+
+		expect(clearGoogleAccountTokens(deps)).toBe("refresh-token-value");
+		expect(deps.secretStorage.getSecret(`dailycalsync-google-${ACCOUNT_ID}-access-token`)).toBe("");
+		expect(deps.secretStorage.getSecret(`dailycalsync-google-${ACCOUNT_ID}-refresh-token`)).toBe("");
+		expect(deps.settings.googleAccounts[0].tokenExpiresAt).toBeUndefined();
 	});
 });
 

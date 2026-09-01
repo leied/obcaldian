@@ -16,17 +16,17 @@
 	"author": "lzccr",
 	"license": "MIT",
 	"devDependencies": {
-		"@eslint/js": "^9.39.5",
-		"@types/node": "^20.11.5",
-		"esbuild": "^0.19.11",
-		"eslint": "^9.39.5",
+		"@eslint/js": "^10.0.1",
+		"@types/node": "^26.4.0",
+		"esbuild": "^0.28.2",
+		"eslint": "^10.9.1",
 		"eslint-plugin-obsidianmd": "^0.4.2",
 		"globals": "^17.11.0",
 		"jiti": "^2.7.0",
 		"obsidian": "latest",
-		"tslib": "2.6.2",
+		"tslib": "2.8.1",
 		"typescript": "5.3.3",
 		"typescript-eslint": "^8.69.0",
-		"vitest": "^2.1.9"
+		"vitest": "^4.1.11"
 	}
 }

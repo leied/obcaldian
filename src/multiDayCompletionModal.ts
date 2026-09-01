@@ -13,12 +13,14 @@ class MultiDayCompletionModal extends Modal {
 	}
 
 	onOpen(): void {
+		this.modalEl.addClass("dailycalsync-multi-day-modal");
 		this.contentEl.createEl("h3", { text: "Multi-day event completed" });
 		this.contentEl.createEl("p", {
 			text: `\u201C${this.request.title}\u201D is checked on ${this.request.completedFrom}. Mark its other days done too, including notes that have not been synced yet?`,
 		});
 
 		new Setting(this.contentEl)
+			.setClass("dailycalsync-multi-day-actions")
 			.addButton((button) =>
 				button.setButtonText("Cancel sync").onClick(() => this.finish("cancel"))
 			)

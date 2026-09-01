@@ -112,3 +112,38 @@
 .dailycalsync-onboarding ul {
 	padding-inline-start: 1.5rem;
 }
+
+.modal.dailycalsync-multi-day-modal {
+	width: min(42rem, calc(100vw - 2rem));
+	max-width: 42rem;
+}
+
+.dailycalsync-multi-day-modal p {
+	white-space: normal;
+	overflow-wrap: anywhere;
+	line-height: var(--line-height-normal);
+}
+
+.dailycalsync-multi-day-actions .setting-item-info {
+	display: none;
+}
+
+.dailycalsync-multi-day-actions .setting-item-control {
+	display: flex;
+	flex: 1 1 auto;
+	flex-direction: column;
+	align-items: stretch;
+	gap: 0.5rem;
+	width: 100%;
+}
+
+.dailycalsync-multi-day-actions button {
+	justify-content: flex-start;
+	width: 100%;
+	height: auto;
+	min-height: var(--input-height);
+	padding-block: 0.5rem;
+	text-align: start;
+	white-space: normal;
+	overflow-wrap: anywhere;
+}

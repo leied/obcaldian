@@ -64,6 +64,7 @@ export class DailyCalSyncSettingTab extends PluginSettingTab {
 		this.renderICalFeeds();
 		this.renderRendering();
 		this.renderSync();
+		this.renderMaintenance();
 	}
 
 	private renderDailyNotes(): void {
@@ -373,20 +374,30 @@ export class DailyCalSyncSettingTab extends PluginSettingTab {
 
 	private renderRendering(): void {
 		const settings = this.plugin.settings;
-		new Setting(this.containerEl).setName("Rendering and privacy").setHeading();
 		const addToggle = (name: string, description: string, key: BooleanRenderingKey): void => {
 			new Setting(this.containerEl).setName(name).setDesc(description).addToggle((toggle) => toggle.setValue(settings.rendering[key]).onChange(async (value) => {
 				settings.rendering[key] = value;
 				await this.plugin.saveSettings();
 			}));
 		};
+		new Setting(this.containerEl).setName("Calendar display").setHeading();
 		addToggle("All-day events first", "Group all-day events before timed events.", "allDayFirst");
+		addToggle("Calendar colors", "Use stable theme-aware calendar color classes.", "useGoogleCalendarColors");
+		new Setting(this.containerEl).setName("Clock").addDropdown((dropdown) => dropdown.addOption("system", "System default").addOption("12", "12-hour").addOption("24", "24-hour").setValue(settings.rendering.hourCycle).onChange(async (value) => {
+			settings.rendering.hourCycle = value as typeof settings.rendering.hourCycle;
+			await this.plugin.saveSettings();
+		}));
+		addToggle("End times", "Show event end times.", "showEndTime");
+
+		new Setting(this.containerEl).setName("Event details and privacy").setHeading();
 		addToggle("Descriptions", "Persist event descriptions in footnotes.", "showDescriptions");
 		addToggle("Attendees", "Persist attendee lists for events with at least three attendees.", "showAttendees");
 		addToggle("Attendee email addresses", "Use emails when display names are unavailable.", "includeAttendeeEmails");
 		addToggle("Locations", "Persist event locations.", "showLocations");
 		addToggle("Meeting links", "Persist HTTPS meeting links.", "showMeetingLinks");
 		addToggle("Redact private events", "Render private events as Busy.", "redactPrivateEvents");
+
+		new Setting(this.containerEl).setName("Event filters").setHeading();
 		addToggle("Declined events", "Include declined events.", "includeDeclined");
 		addToggle("Cancelled events", "Include cancelled occurrences.", "includeCancelled");
 		addToggle("Free events", "Include transparent/free events.", "includeFreeEvents");
@@ -394,17 +405,11 @@ export class DailyCalSyncSettingTab extends PluginSettingTab {
 		addToggle("Out of office", "Include Google out-of-office events.", "includeOutOfOffice");
 		addToggle("Working location", "Include Google working-location events.", "includeWorkingLocation");
 		addToggle("Birthdays", "Include Google birthday events.", "includeBirthdays");
-		addToggle("Calendar colors", "Use stable theme-aware calendar color classes.", "useGoogleCalendarColors");
-		new Setting(this.containerEl).setName("Clock").addDropdown((dropdown) => dropdown.addOption("system", "System default").addOption("12", "12-hour").addOption("24", "24-hour").setValue(settings.rendering.hourCycle).onChange(async (value) => {
-			settings.rendering.hourCycle = value as typeof settings.rendering.hourCycle;
-			await this.plugin.saveSettings();
-		}));
-		addToggle("End times", "Show event end times.", "showEndTime");
 	}
 
 	private renderSync(): void {
 		const settings = this.plugin.settings;
-		new Setting(this.containerEl).setName("Sync").setHeading();
+		new Setting(this.containerEl).setName("Sync behavior").setHeading();
 		new Setting(this.containerEl).setName("Days ahead").addText((text) => {
 			text.inputEl.type = "number";
 			text.inputEl.min = "0";
@@ -421,9 +426,7 @@ export class DailyCalSyncSettingTab extends PluginSettingTab {
 			if (value === "independent") settings.multiDayCompletionRules = {};
 			await this.plugin.saveSettings();
 		}));
-		new Setting(this.containerEl).setName("Sync now").setDesc("Sync every enabled Google and iCalendar source into the configured range.").addButton((button) => button.setButtonText("Sync now").setCta().onClick(async () => {
-			await syncAll(this.app.vault, this.plugin.authDeps(), this.plugin.syncOptions());
-		}));
+		new Setting(this.containerEl).setName("Automation and status").setHeading();
 		new Setting(this.containerEl).setName("Automatic check (minutes)").setDesc("0 disables background checks.").addText((text) => {
 			text.inputEl.type = "number";
 			text.inputEl.min = "0";
@@ -436,9 +439,48 @@ export class DailyCalSyncSettingTab extends PluginSettingTab {
 				}
 			});
 		});
+		new Setting(this.containerEl).setName("Sync now").setDesc("Sync every enabled Google and iCalendar source into the configured range.").addButton((button) => button.setButtonText("Sync now").setCta().onClick(async () => {
+			await syncAll(this.app.vault, this.plugin.authDeps(), this.plugin.syncOptions());
+		}));
 		const failedCalendars = settings.googleAccounts.reduce((total, account) => total + account.calendars.filter((calendar) => account.calendarHealth[calendar.id]?.lastFailureAt).length, 0);
 		new Setting(this.containerEl).setName("Sync health").setDesc(`Last success: ${settings.lastSuccessfulSyncAt ? window.moment(settings.lastSuccessfulSyncAt).fromNow() : "never"}. ${failedCalendars} Google calendar(s) have a recorded failure.`);
 		new Setting(this.containerEl).setName("Diagnostics").setDesc("Copies redacted configuration and failures; URLs, IDs, credentials, and event content are excluded.").addButton((button) => button.setButtonText("Copy diagnostics").onClick(() => this.plugin.copyDiagnostics()));
+	}
+
+	private renderMaintenance(): void {
+		const settings = this.plugin.settings;
+		const confirmationId = "maintenance:cached-data";
+		new Setting(this.containerEl).setName("Data and maintenance").setHeading();
+		const cleanup = new Setting(this.containerEl)
+			.setName("Clear cached calendar data")
+			.setDesc(this.pendingRemovalId === confirmationId
+				? "Clear downloaded event caches and sync history now? Account connections, settings, completion rules, and daily notes are preserved."
+				: "Removes downloaded event caches and sync health/history. The next sync rebuilds them; accounts, secrets, settings, completion rules, and notes are not changed.");
+		if (this.pendingRemovalId === confirmationId) {
+			cleanup
+				.addButton((button) => button.setButtonText("Cancel").onClick(() => {
+					this.pendingRemovalId = null;
+					this.display();
+				}))
+				.addButton((button) => button.setButtonText("Clear cached data").setWarning().onClick(async () => {
+					for (const account of settings.googleAccounts) {
+						account.calendarCaches = {};
+						account.calendarHealth = {};
+					}
+					settings.iCalCaches = {};
+					settings.recentFailures = [];
+					settings.lastSuccessfulSyncAt = undefined;
+					this.pendingRemovalId = null;
+					await this.plugin.saveSettings();
+					this.display();
+					new Notice("DailyCalSync: cached calendar data and sync history cleared.");
+				}));
+		} else {
+			cleanup.addButton((button) => button.setButtonText("Clear cached data").setWarning().onClick(() => {
+				this.pendingRemovalId = confirmationId;
+				this.display();
+			}));
+		}
 	}
 
 	private async refreshCalendarList(account: GoogleAccountProfile): Promise<void> {

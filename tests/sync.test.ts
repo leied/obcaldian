@@ -516,6 +516,26 @@ describe("multi-day completion behavior", () => {
 		expect(confirmMultiDay).toHaveBeenCalledTimes(2);
 	});
 
+	it("cancels safely when the multi-day prompt is cancelled", async () => {
+		const event = spanningEvent();
+		const vault = await vaultWithCheckedFirstDay(event);
+		const before = contentOn(vault, 0);
+		const deps = connectedDeps();
+		deps.settings.multiDayCompletionBehavior = "ask";
+		vi.mocked(refreshCalendarCache).mockResolvedValue([event]);
+		const onCancelled = vi.fn();
+
+		await syncRange(vault as never, deps, 1, {
+			confirmMultiDay: async () => "cancel",
+			onCancelled,
+		});
+
+		expect(onCancelled).toHaveBeenCalledOnce();
+		expect(contentOn(vault, 0)).toBe(before);
+		expect(vault.getAbstractFileByPath(`${moment().add(1, "day").format("YYYYMMDD")}.md`)).toBeNull();
+		expect(deps.settings.multiDayCompletionRules).toEqual({});
+	});
+
 	it("remembers an accepted manual choice for following unsynced dates", async () => {
 		const event = spanningEvent();
 		const vault = await vaultWithCheckedFirstDay(event);

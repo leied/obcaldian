@@ -20,11 +20,14 @@ class MultiDayCompletionModal extends Modal {
 
 		new Setting(this.contentEl)
 			.addButton((button) =>
-				button.setButtonText("Keep days separate").onClick(() => this.finish("separate"))
+				button.setButtonText("Cancel sync").onClick(() => this.finish("cancel"))
+			)
+			.addButton((button) =>
+				button.setButtonText("Check this day only").onClick(() => this.finish("separate"))
 			)
 			.addButton((button) =>
 				button
-					.setButtonText(`Through ${this.request.eventEnd}`)
+					.setButtonText(`Check through ${this.request.eventEnd}`)
 					.onClick(() => this.finish("following"))
 			)
 			.addButton((button) =>
@@ -39,7 +42,7 @@ class MultiDayCompletionModal extends Modal {
 		this.contentEl.empty();
 		if (!this.settled) {
 			this.settled = true;
-			this.resolveChoice("separate");
+			this.resolveChoice("cancel");
 		}
 	}
 

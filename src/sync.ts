@@ -105,16 +105,18 @@ export interface MultiDayConfirmation {
 }
 
 /**
- * What to do with the rest of a multi-day event's days: leave them alone, mark
- * the ones from `completedFrom` onward, or mark the entire span including days
- * before it.
+ * What to do with a multi-day event: cancel the sync, leave its other days
+ * alone, mark the ones from `completedFrom` onward, or mark the entire span
+ * including days before it.
  */
-export type MultiDayDecision = "separate" | "following" | "whole";
+export type MultiDayDecision = "cancel" | "separate" | "following" | "whole";
+
+class MultiDayCompletionCancelled extends Error {}
 
 export interface SyncOptions {
 	/** Whether to surface result Notices. Defaults to true. False is used by background sync. */
 	notify?: boolean;
-	/** UI callback used only by interactive syncs when multi-day behavior is ask. */
+	/** UI callback used only by interactive syncs when multi-day behavior is "ask every time". */
 	confirmMultiDay?: (request: MultiDayConfirmation) => Promise<MultiDayDecision>;
 	/** Optional manual-sync preview. Return false to cancel without writing. */
 	preview?: (plan: SyncPlan) => Promise<boolean>;
@@ -392,6 +394,7 @@ async function resolveCheckedEvents(
 					eventEnd: group.span.endDate,
 				});
 			}
+			if (decision === "cancel") throw new MultiDayCompletionCancelled();
 			if (incomplete && decision !== "separate") {
 				rule = {
 					completedFrom: decision === "whole" ? group.span.startDate : firstChecked,
@@ -694,6 +697,10 @@ async function runDates(
 		}
 		opts.onSuccess?.(dates.length);
 	} catch (error) {
+		if (error instanceof MultiDayCompletionCancelled) {
+			opts.onCancelled?.();
+			return;
+		}
 		const message = error instanceof Error ? error.message : "Unknown sync error.";
 		const category =
 			error instanceof CategorizedSyncError ? error.category : classifyFailure(error);

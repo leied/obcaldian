@@ -416,7 +416,7 @@ export class DailyCalSyncSettingTab extends PluginSettingTab {
 				}
 			});
 		});
-		new Setting(this.containerEl).setName("Multi-day completion").addDropdown((dropdown) => dropdown.addOption("independent", "Keep days independent").addOption("ask", "Ask during manual sync").addOption("following", "Mark following days done").addOption("all", "Mark every day of the event done").setValue(settings.multiDayCompletionBehavior).onChange(async (value) => {
+		new Setting(this.containerEl).setName("Multi-day completion").addDropdown((dropdown) => dropdown.addOption("ask", "Ask every time").addOption("independent", "Always check this day only").addOption("following", "Always check this and following days").addOption("all", "Always check the whole event").setValue(settings.multiDayCompletionBehavior).onChange(async (value) => {
 			settings.multiDayCompletionBehavior = value as typeof settings.multiDayCompletionBehavior;
 			if (value === "independent") settings.multiDayCompletionRules = {};
 			await this.plugin.saveSettings();

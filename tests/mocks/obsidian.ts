@@ -56,6 +56,7 @@ export class SecretStorage {
 	private store = new Map<string, string>();
 
 	setSecret(id: string, secret: string): void {
+		if (!/^[a-z0-9-]{1,64}$/.test(id)) throw new Error("Secret ID is invalid. Use only lowercase letters, numbers and dashes, 64 characters max.");
 		this.store.set(id, secret);
 	}
 

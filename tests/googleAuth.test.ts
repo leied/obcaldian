@@ -1,6 +1,7 @@
 import { SecretStorage } from "obsidian";
 import { describe, expect, it } from "vitest";
 import {
+	clearGoogleAccountSecrets,
 	clearGoogleAccountTokens,
 	getClientSecret,
 	isConnected,
@@ -87,6 +88,15 @@ describe("local token removal", () => {
 		expect(clearGoogleAccountTokens(deps)).toBe("refresh-token-value");
 		expect(deps.secretStorage.getSecret(`dailycalsync-google-${ACCOUNT_ID}-access-token`)).toBe("");
 		expect(deps.secretStorage.getSecret(`dailycalsync-google-${ACCOUNT_ID}-refresh-token`)).toBe("");
+		expect(deps.settings.googleAccounts[0].tokenExpiresAt).toBeUndefined();
+	});
+
+	it("allows a legacy long-ID profile to be cleaned up without touching invalid secret IDs", () => {
+		const deps = makeDeps(Date.now() + 3600_000);
+		deps.settings.googleAccounts[0].id = "google-12345678-1234-1234-1234-123456789abc";
+		deps.accountId = deps.settings.googleAccounts[0].id;
+
+		expect(() => clearGoogleAccountSecrets(deps)).not.toThrow();
 		expect(deps.settings.googleAccounts[0].tokenExpiresAt).toBeUndefined();
 	});
 });

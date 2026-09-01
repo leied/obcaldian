@@ -1,11 +1,7 @@
 import { App, Modal, Notice, Setting } from "obsidian";
 import type DailyCalSyncPlugin from "./main";
 import { setICalUrl } from "./ical";
-
-function localId(prefix: string): string {
-	const random = window.crypto.randomUUID?.() ?? `${Date.now()}-${Math.random().toString(36).slice(2)}`;
-	return `${prefix}-${random.toLowerCase().replace(/[^a-z0-9-]/g, "").slice(0, 48)}`;
-}
+import { createLocalId } from "./localId";
 
 export class OnboardingModal extends Modal {
 	private step = 0;
@@ -95,7 +91,7 @@ export class OnboardingModal extends Modal {
 				.setDisabled(hasGoogleProfile)
 				.onClick(async () => {
 					if (settings.googleAccounts.length > 0) return;
-					settings.googleAccounts.push({ id: localId("google"), name: "Google account", clientId: "", projectId: "", calendars: [], calendarHealth: {}, calendarCaches: {} });
+					settings.googleAccounts.push({ id: createLocalId("google"), name: "Google account", clientId: "", projectId: "", calendars: [], calendarHealth: {}, calendarCaches: {} });
 					this.render();
 					await this.plugin.saveSettings();
 					new Notice("DailyCalSync: Google profile added. You can add more later from settings.");
@@ -111,7 +107,7 @@ export class OnboardingModal extends Modal {
 		});
 		new Setting(this.contentEl).setName("Add read-only iCalendar feed").addButton((button) => button.setButtonText("Add feed").onClick(async () => {
 			try {
-				const id = localId("ical");
+				const id = createLocalId("ical");
 				setICalUrl(this.plugin.authDeps(), id, this.iCalUrl);
 				settings.iCalCalendars.push({ id, summary: this.iCalName.trim() || "iCalendar feed", enabled: true, addAs: "checkbox" });
 				await this.plugin.saveSettings();

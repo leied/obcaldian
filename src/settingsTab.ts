@@ -1,7 +1,7 @@
 import { App, Notice, PluginSettingTab, SecretComponent, Setting } from "obsidian";
 import type DailyCalSyncPlugin from "./main";
 import {
-	clearGoogleAccountTokens,
+	clearGoogleAccountSecrets,
 	connectGoogleAccount,
 	disconnectGoogleAccount,
 	getClientSecret,
@@ -13,6 +13,7 @@ import {
 } from "./googleAuth";
 import { listCalendars } from "./googleCalendar";
 import { clearICalUrl, getICalUrl, setICalUrl } from "./ical";
+import { createLocalId } from "./localId";
 import { OnboardingModal } from "./onboardingModal";
 import { PrivacyModal } from "./privacyModal";
 import type { CalendarConfig, GoogleAccountProfile, RenderingSettings } from "./settings";
@@ -22,11 +23,6 @@ import { isValidTimeZone } from "./timezone";
 type BooleanRenderingKey = {
 	[Key in keyof RenderingSettings]: RenderingSettings[Key] extends boolean ? Key : never;
 }[keyof RenderingSettings];
-
-function localId(prefix: string): string {
-	const random = window.crypto.randomUUID?.() ?? `${Date.now()}-${Math.random().toString(36).slice(2)}`;
-	return `${prefix}-${random.toLowerCase().replace(/[^a-z0-9-]/g, "").slice(0, 48)}`;
-}
 
 export class DailyCalSyncSettingTab extends PluginSettingTab {
 	private connectionAbortController: AbortController | null = null;
@@ -155,7 +151,7 @@ export class DailyCalSyncSettingTab extends PluginSettingTab {
 						this.display();
 						return;
 					}
-					settings.googleAccounts.push({ id: localId("google"), name: `Google account ${settings.googleAccounts.length + 1}`, clientId: "", projectId: "", calendars: [], calendarHealth: {}, calendarCaches: {} });
+					settings.googleAccounts.push({ id: createLocalId("google"), name: `Google account ${settings.googleAccounts.length + 1}`, clientId: "", projectId: "", calendars: [], calendarHealth: {}, calendarCaches: {} });
 					this.display();
 					await this.plugin.saveSettings();
 				}));
@@ -260,7 +256,7 @@ export class DailyCalSyncSettingTab extends PluginSettingTab {
 		const settings = this.plugin.settings;
 		new Setting(this.containerEl).setName("Secret iCalendar feeds").setHeading();
 		new Setting(this.containerEl).setName("Add read-only feed").setDesc("The HTTPS URL is stored only in Obsidian SecretStorage. Treat it like a password.").addButton((button) => button.setButtonText("Add iCal feed").onClick(async () => {
-			settings.iCalCalendars.push({ id: localId("ical"), summary: `iCalendar ${settings.iCalCalendars.length + 1}`, enabled: true, addAs: "checkbox" });
+		settings.iCalCalendars.push({ id: createLocalId("ical"), summary: `iCalendar ${settings.iCalCalendars.length + 1}`, enabled: true, addAs: "checkbox" });
 			await this.plugin.saveSettings();
 			this.display();
 		}));
@@ -343,8 +339,7 @@ export class DailyCalSyncSettingTab extends PluginSettingTab {
 
 	private async removeGoogleAccount(account: GoogleAccountProfile, deps: AuthDeps): Promise<void> {
 		try {
-			const refreshToken = clearGoogleAccountTokens(deps);
-			setClientSecret(deps, "");
+			const refreshToken = clearGoogleAccountSecrets(deps);
 			const index = this.plugin.settings.googleAccounts.indexOf(account);
 			if (index < 0) throw new Error("This profile was already removed.");
 			this.plugin.settings.googleAccounts.splice(index, 1);

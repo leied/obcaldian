@@ -48,6 +48,18 @@ export function notePathFor(settings: DailyCalSyncSettings, date: Moment): strin
 	return normalizePath(folder ? `${folder}/${fileName}` : fileName);
 }
 
+/** Resolves both full vault paths and the extensionless paths used by Obsidian's core Daily Notes plugin. */
+export function templateFileFor(vault: Vault, configuredPath: string): TFile | null {
+	const normalized = normalizePath(configuredPath.trim());
+	if (!normalized) return null;
+	for (const candidate of [normalized, normalized.toLowerCase().endsWith(".md") ? null : `${normalized}.md`]) {
+		if (!candidate) continue;
+		const file = vault.getAbstractFileByPath(candidate);
+		if (file instanceof TFile) return file;
+	}
+	return null;
+}
+
 /**
  * Creates the daily note from the user's template if it doesn't already
  * exist. Never rewrites an existing note's body.
@@ -79,10 +91,8 @@ export async function renderNewDailyNoteContent(
 	date: Moment
 ): Promise<string> {
 	if (!settings.templatePath) throw new Error("Set a template file in DailyCalSync settings first.");
-	const templateFile = vault.getAbstractFileByPath(normalizePath(settings.templatePath));
-	if (!(templateFile instanceof TFile)) {
-		throw new Error(`Template file not found: ${settings.templatePath}`);
-	}
+	const templateFile = templateFileFor(vault, settings.templatePath);
+	if (!templateFile) throw new Error(`Template file not found: ${settings.templatePath}. Choose an existing Markdown file in your vault.`);
 	const templateContent = await vault.read(templateFile);
 	if (!templateContent.includes(CALENDAR_TOKEN)) {
 		throw new Error(

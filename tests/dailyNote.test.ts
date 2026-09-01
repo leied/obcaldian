@@ -7,6 +7,7 @@ import {
 	notePathFor,
 	renderCalendarBlock,
 	syncNoteCalendarSection,
+	templateFileFor,
 } from "../src/dailyNote";
 import type { GoogleEvent } from "../src/googleCalendar";
 import { multiDayEventKey, multiDayEventMarker } from "../src/multiDay";
@@ -294,6 +295,32 @@ describe("ensureDailyNote", () => {
 		expect(content).toContain("# 2026-07-22");
 		expect(content).toContain("<!-- dailycalsync:calendar:start -->");
 		expect(content).toContain('_(not yet synced');
+	});
+
+	it("resolves an extensionless core Daily Notes template path containing spaces", async () => {
+		const vault = new FakeVault();
+		await vault.create("Y - Templates/Daily/DNT - Daily Notes Template.md", "# {{date}}\n\n{calendar}\n");
+		const settings = {
+			...DEFAULT_SETTINGS,
+			templatePath: "Y - Templates/Daily/DNT - Daily Notes Template",
+		};
+
+		await ensureDailyNote(vault as never, settings, DATE);
+
+		expect(vault.contentOf("20260722.md")).toContain("# 2026-07-22");
+	});
+
+	it("normalizes separators without escaping literal filename punctuation", async () => {
+		const vault = new FakeVault();
+		const path = "Y - Templates/Daily/DNT #1 [Main]'s Template.md";
+		await vault.create(path, "{calendar}");
+
+		const resolved = templateFileFor(
+			vault as never,
+			"  Y - Templates\\Daily\\DNT #1 [Main]'s Template  "
+		);
+
+		expect(resolved?.path).toBe(path);
 	});
 
 	it("returns the existing note without touching its content if it already exists", async () => {

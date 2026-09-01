@@ -61,6 +61,20 @@ function accountSecretKey(accountId: string, kind: "client-secret" | "access-tok
 	return `dailycalsync-google-${accountId}-${kind}`;
 }
 
+function validSecretId(id: string): boolean {
+	return /^[a-z0-9-]{1,64}$/.test(id);
+}
+
+function getAccountSecret(deps: AuthDeps, accountId: string, kind: "client-secret" | "access-token" | "refresh-token"): string {
+	const id = accountSecretKey(accountId, kind);
+	return validSecretId(id) ? deps.secretStorage.getSecret(id) ?? "" : "";
+}
+
+function clearAccountSecret(deps: AuthDeps, accountId: string, kind: "client-secret" | "access-token" | "refresh-token"): void {
+	const id = accountSecretKey(accountId, kind);
+	if (validSecretId(id)) deps.secretStorage.setSecret(id, "");
+}
+
 export function googleAccount(deps: AuthDeps): GoogleAccountProfile {
 	if (!deps.accountId) throw new Error("Choose a Google account profile first.");
 	const account = deps.settings.googleAccounts.find((candidate) => candidate.id === deps.accountId);
@@ -174,7 +188,7 @@ export async function importGoogleCredentials(deps: AuthDeps, rawText: string): 
 
 export function getClientSecret(deps: AuthDeps): string {
 	const account = googleAccount(deps);
-	return deps.secretStorage.getSecret(accountSecretKey(account.id, "client-secret")) ?? "";
+	return getAccountSecret(deps, account.id, "client-secret");
 }
 
 export function setClientSecret(deps: AuthDeps, secret: string): void {
@@ -187,16 +201,24 @@ export function isConnected(deps: AuthDeps): boolean {
 		return deps.settings.googleAccounts.some((account) => isConnected(withGoogleAccount(deps, account.id)));
 	}
 	const account = googleAccount(deps);
-	return account.tokenExpiresAt !== undefined && Boolean(deps.secretStorage.getSecret(accountSecretKey(account.id, "refresh-token")));
+	return account.tokenExpiresAt !== undefined && Boolean(getAccountSecret(deps, account.id, "refresh-token"));
 }
 
 /** Clears every locally stored token for an account and returns the former refresh token for optional revocation. */
 export function clearGoogleAccountTokens(deps: AuthDeps): string {
 	const account = googleAccount(deps);
-	const refreshToken = deps.secretStorage.getSecret(accountSecretKey(account.id, "refresh-token")) ?? "";
-	deps.secretStorage.setSecret(accountSecretKey(account.id, "access-token"), "");
-	deps.secretStorage.setSecret(accountSecretKey(account.id, "refresh-token"), "");
+	const refreshToken = getAccountSecret(deps, account.id, "refresh-token");
+	clearAccountSecret(deps, account.id, "access-token");
+	clearAccountSecret(deps, account.id, "refresh-token");
 	account.tokenExpiresAt = undefined;
+	return refreshToken;
+}
+
+/** Clears all local credentials without failing on legacy profiles whose derived secret IDs are too long. */
+export function clearGoogleAccountSecrets(deps: AuthDeps): string {
+	const account = googleAccount(deps);
+	const refreshToken = clearGoogleAccountTokens(deps);
+	clearAccountSecret(deps, account.id, "client-secret");
 	return refreshToken;
 }
 
@@ -313,7 +335,7 @@ export async function disconnectGoogleAccount(deps: AuthDeps, revoke = true): Pr
 
 async function refreshAccessToken(deps: AuthDeps): Promise<string> {
 	const account = googleAccount(deps);
-	const refreshToken = deps.secretStorage.getSecret(accountSecretKey(account.id, "refresh-token"));
+	const refreshToken = getAccountSecret(deps, account.id, "refresh-token");
 	if (!refreshToken) throw new ReconnectRequiredError();
 	const response = await googleRequest({
 		url: "https://oauth2.googleapis.com/token",
@@ -345,7 +367,7 @@ export async function getValidAccessToken(deps: AuthDeps): Promise<string> {
 	const account = googleAccount(deps);
 	if (account.tokenExpiresAt === undefined) throw new ReconnectRequiredError();
 	if (Date.now() > account.tokenExpiresAt - 60_000) return refreshAccessToken(deps);
-	const accessToken = deps.secretStorage.getSecret(accountSecretKey(account.id, "access-token"));
+	const accessToken = getAccountSecret(deps, account.id, "access-token");
 	if (!accessToken) throw new ReconnectRequiredError();
 	return accessToken;
 }

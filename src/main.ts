@@ -1,11 +1,30 @@
-import { Notice, Plugin } from "obsidian";
-import { DEFAULT_SETTINGS, type ObcaldianSettings } from "./settings";
+import { Notice, Plugin, TFile } from "obsidian";
+import { loadSettingsData, type ObcaldianSettings } from "./settings";
 import { ObcaldianSettingTab } from "./settingsTab";
-import { ensureDailyNote } from "./dailyNote";
-import { autoSyncTick, syncAll, syncRange, syncSingleNote, type SyncOptions } from "./sync";
-import { migrateLegacySecrets, type AuthDeps } from "./googleAuth";
+import {
+	MARKER_END,
+	MARKER_START,
+	calendarSectionFromContent,
+	ensureDailyNoteResult,
+	notePathFor,
+} from "./dailyNote";
+import {
+	autoSyncTick,
+	syncAll,
+	syncRange,
+	syncDateRange,
+	syncSingleNote,
+	undoSyncSnapshot,
+	type SyncOptions,
+	type SyncUndoSnapshot,
+} from "./sync";
+import { isConnected, migrateLegacySecrets, type AuthDeps } from "./googleAuth";
 import { SyncDaysModal } from "./syncDaysModal";
 import { confirmMultiDayCompletion } from "./multiDayCompletionModal";
+import { confirmSyncPlan } from "./syncPreviewModal";
+import { SyncDateRangeModal } from "./syncDateRangeModal";
+import { RepairCalendarModal } from "./repairCalendarModal";
+import { copyRedactedDiagnostics } from "./diagnostics";
 
 type SyncBarState =
 	| { kind: "idle" }
@@ -18,9 +37,11 @@ export default class ObcaldianPlugin extends Plugin {
 	private autoSyncIntervalId: number | null = null;
 	private statusBarItem!: HTMLElement;
 	private syncBarState: SyncBarState = { kind: "idle" };
+	private lastSyncSnapshot: SyncUndoSnapshot | null = null;
 
 	async onload() {
 		await this.loadSettings();
+		if (this.settings.useDailyNotesSettings) await this.syncDailyNotesSettings();
 		this.addSettingTab(new ObcaldianSettingTab(this.app, this));
 		this.applyAutoSyncInterval();
 
@@ -32,11 +53,22 @@ export default class ObcaldianPlugin extends Plugin {
 		this.renderStatusBar();
 		// "synced Xm ago" goes stale as time passes without a resync; refresh its text periodically.
 		this.registerInterval(window.setInterval(() => this.renderStatusBar(), 30_000));
+		this.registerDomEvent(window, "online", () => this.quietCatchUp());
+		this.registerDomEvent(document, "visibilitychange", () => {
+			if (document.visibilityState === "visible") this.quietCatchUp();
+		});
+		this.registerInterval(window.setTimeout(() => this.quietCatchUp(), 5_000));
 
 		this.addCommand({
 			id: "open-today",
 			name: "Open today's daily note",
 			callback: () => this.openDailyNote(0),
+		});
+
+		this.addCommand({
+			id: "undo-last-calendar-sync",
+			name: "Undo last calendar sync",
+			callback: () => this.undoLastSync(),
 		});
 
 		this.addCommand({
@@ -53,8 +85,32 @@ export default class ObcaldianPlugin extends Plugin {
 
 		this.addCommand({
 			id: "sync-next-days",
-			name: "Sync next N days...",
+			name: "Sync upcoming days...",
 			callback: () => this.openSyncDaysModal(),
+		});
+
+		this.addCommand({
+			id: "sync-date-range",
+			name: "Sync calendar date range...",
+			callback: () => this.openDateRangeModal(),
+		});
+
+		this.addCommand({
+			id: "sync-current-note",
+			name: "Sync calendar for this note",
+			callback: () => this.syncCurrentNote(),
+		});
+
+		this.addCommand({
+			id: "repair-calendar-section",
+			name: "Repair calendar section",
+			callback: () => this.repairActiveCalendarSection(),
+		});
+
+		this.addCommand({
+			id: "copy-diagnostics",
+			name: "Copy redacted diagnostics",
+			callback: () => this.copyDiagnostics(),
 		});
 
 		this.addRibbonIcon("calendar-plus", "Open today's daily note", () => {
@@ -66,9 +122,32 @@ export default class ObcaldianPlugin extends Plugin {
 		this.addRibbonIcon("refresh-cw", "Sync Google calendars now", () => {
 			void syncAll(this.app.vault, this.authDeps(), this.syncOptions());
 		});
-		this.addRibbonIcon("calendar-range", "Sync next N days...", () => {
+		this.addRibbonIcon("calendar-range", "Sync upcoming days...", () => {
 			this.openSyncDaysModal();
 		});
+	}
+
+	/** Copies the core Daily Notes configuration through a guarded optional integration. */
+	async syncDailyNotesSettings(): Promise<boolean> {
+		type DailyNotesOptions = { folder?: string; format?: string; template?: string };
+		type InternalPlugin = { instance?: { options?: DailyNotesOptions } };
+		type InternalPlugins = {
+			getPluginById?: (id: string) => InternalPlugin | undefined;
+			plugins?: Record<string, InternalPlugin>;
+		};
+		const internalPlugins = (
+			this.app as unknown as { internalPlugins?: InternalPlugins }
+		).internalPlugins;
+		const dailyNotes =
+			internalPlugins?.getPluginById?.("daily-notes") ??
+			internalPlugins?.plugins?.["daily-notes"];
+		const options = dailyNotes?.instance?.options;
+		if (!options) return false;
+		this.settings.dailyNoteFolder = options.folder?.trim() ?? "";
+		this.settings.templatePath = options.template?.trim() ?? "";
+		this.settings.dailyNoteFormat = options.format?.trim() || "YYYYMMDD";
+		await this.saveSettings();
+		return true;
 	}
 
 	private openSyncDaysModal(): void {
@@ -77,11 +156,90 @@ export default class ObcaldianPlugin extends Plugin {
 		}).open();
 	}
 
+	private openDateRangeModal(): void {
+		new SyncDateRangeModal(
+			this.app,
+			this.settings.syncDaysAhead,
+			this.settings.noteCreationMode === "existing-only",
+			(choice) => {
+				void syncDateRange(this.app.vault, this.authDeps(), choice.start, choice.end, {
+					...this.syncOptions(),
+					existingOnly: choice.existingOnly,
+				});
+			}
+		).open();
+	}
+
+	private async syncCurrentNote(): Promise<void> {
+		const file = this.app.workspace.getActiveFile();
+		if (!(file instanceof TFile)) {
+			new Notice("Obcaldian: open a daily note first.");
+			return;
+		}
+		const date = window.moment(file.basename, this.settings.dailyNoteFormat, true);
+		if (!date.isValid() || notePathFor(this.settings, date) !== file.path) {
+			new Notice("Obcaldian: the active file does not match the configured daily note format.");
+			return;
+		}
+		await syncDateRange(this.app.vault, this.authDeps(), date, date, {
+			...this.syncOptions(),
+			existingOnly: true,
+		});
+	}
+
+	private async repairActiveCalendarSection(): Promise<void> {
+		const file = this.app.workspace.getActiveFile();
+		if (!(file instanceof TFile)) {
+			new Notice("Obcaldian: open the note that needs repair first.");
+			return;
+		}
+		const original = await this.app.vault.read(file);
+		if (calendarSectionFromContent(original) !== null) {
+			new Notice("Obcaldian: this note already has a managed calendar section.");
+			return;
+		}
+		new RepairCalendarModal(this.app, file, () => {
+			void (async () => {
+				const current = await this.app.vault.read(file);
+				if (current !== original) {
+					new Notice("Obcaldian: the note changed during preview; repair was cancelled.");
+					return;
+				}
+				const separator = current.endsWith("\n") ? "\n" : "\n\n";
+				await this.app.vault.modify(
+					file,
+					`${current}${separator}${MARKER_START}\n_(not yet synced)_\n${MARKER_END}\n`
+				);
+				new Notice("Obcaldian: calendar section markers inserted.");
+			})();
+		}).open();
+	}
+
+	async copyDiagnostics(): Promise<void> {
+		try {
+			await copyRedactedDiagnostics(this.manifest.version, this.settings);
+			new Notice("Obcaldian: redacted diagnostics copied.");
+		} catch (error) {
+			new Notice(`Obcaldian: could not copy diagnostics — ${(error as Error).message}`);
+		}
+	}
+
+	private quietCatchUp(): void {
+		if (!isConnected(this.authDeps()) || !this.settings.calendars.some((cal) => cal.enabled)) {
+			return;
+		}
+		const staleAfterMinutes = this.settings.autoSyncIntervalMinutes || 180;
+		const lastSuccess = this.settings.lastSuccessfulSyncAt ?? 0;
+		if (Date.now() - lastSuccess < staleAfterMinutes * 60_000) return;
+		void autoSyncTick(this.app.vault, this.authDeps(), this.syncOptions());
+	}
+
 	authDeps(): AuthDeps {
 		return {
 			settings: this.settings,
 			saveSettings: () => this.saveSettings(),
 			secretStorage: this.app.secretStorage,
+			rollbackCreatedFile: (file) => this.app.fileManager.trashFile(file),
 		};
 	}
 
@@ -105,6 +263,10 @@ export default class ObcaldianPlugin extends Plugin {
 	syncOptions(): SyncOptions {
 		return {
 			confirmMultiDay: (request) => confirmMultiDayCompletion(this.app, request),
+			preview: (plan) => confirmSyncPlan(this.app, plan),
+			onApplied: (snapshot) => {
+				this.lastSyncSnapshot = snapshot;
+			},
 			onStart: () => {
 				this.syncBarState = { kind: "syncing" };
 				this.renderStatusBar();
@@ -113,11 +275,27 @@ export default class ObcaldianPlugin extends Plugin {
 				this.syncBarState = { kind: "success", at: Date.now(), dayCount };
 				this.renderStatusBar();
 			},
+			onCancelled: () => {
+				this.syncBarState = { kind: "idle" };
+				this.renderStatusBar();
+			},
 			onError: (message) => {
 				this.syncBarState = { kind: "error", message };
 				this.renderStatusBar();
 			},
 		};
+	}
+
+	private async undoLastSync(): Promise<void> {
+		if (!this.lastSyncSnapshot) {
+			new Notice("Obcaldian: there is no calendar sync to undo in this session.");
+			return;
+		}
+		const result = await undoSyncSnapshot(this.app.vault, this.lastSyncSnapshot);
+		this.lastSyncSnapshot = null;
+		new Notice(
+			`Obcaldian: restored ${result.restored} calendar section${result.restored === 1 ? "" : "s"}${result.skipped ? `; skipped ${result.skipped} changed note${result.skipped === 1 ? "" : "s"}` : ""}.`
+		);
 	}
 
 	private renderStatusBar(): void {
@@ -147,9 +325,12 @@ export default class ObcaldianPlugin extends Plugin {
 	private async openDailyNote(dayOffset: number) {
 		try {
 			const date = window.moment().add(dayOffset, "day");
-			const file = await ensureDailyNote(this.app.vault, this.settings, date);
-			const wasJustCreated = Date.now() - file.stat.ctime < 2000;
-			if (wasJustCreated) {
+			const { file, created } = await ensureDailyNoteResult(
+				this.app.vault,
+				this.settings,
+				date
+			);
+			if (created) {
 				await syncSingleNote(this.app.vault, this.authDeps(), date, file);
 			}
 			await this.app.workspace.getLeaf(false).openFile(file);
@@ -160,9 +341,10 @@ export default class ObcaldianPlugin extends Plugin {
 
 	async loadSettings() {
 		const raw = ((await this.loadData()) ?? {}) as Record<string, unknown>;
-		const migrated = migrateLegacySecrets(this.app.secretStorage, raw);
-		this.settings = Object.assign({}, DEFAULT_SETTINGS, raw);
-		if (migrated) {
+		const secretsMigrated = migrateLegacySecrets(this.app.secretStorage, raw);
+		const loaded = loadSettingsData(raw);
+		this.settings = loaded.settings;
+		if (secretsMigrated || loaded.changed) {
 			await this.saveSettings();
 		}
 	}

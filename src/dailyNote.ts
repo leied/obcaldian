@@ -1,30 +1,48 @@
 import { Notice, TFile, Vault, normalizePath } from "obsidian";
 import type { Moment } from "moment";
-import type { CalendarConfig, ObcaldianSettings } from "./settings";
+import {
+	DEFAULT_RENDERING_SETTINGS,
+	type CalendarConfig,
+	type ObcaldianSettings,
+	type RenderingSettings,
+} from "./settings";
 import type { GoogleEvent } from "./googleCalendar";
 import {
 	dayNumberInSpan,
-	multiDayEventKey,
-	multiDayEventMarker,
+	eventKeyFromMarkerLine,
+	eventMarker,
+	eventOccurrenceKey,
 	multiDaySpan,
 } from "./multiDay";
 
 const CALENDAR_TOKEN = "{calendar}";
-const MARKER_START = "<!-- obcaldian:calendar:start -->";
-const MARKER_END = "<!-- obcaldian:calendar:end -->";
+export const MARKER_START = "<!-- obcaldian:calendar:start -->";
+export const MARKER_END = "<!-- obcaldian:calendar:end -->";
 const PLACEHOLDER_BODY = "_(not yet synced — click \"Sync now\" in Obcaldian settings)_";
+
+export interface EnsuredDailyNote {
+	file: TFile;
+	created: boolean;
+}
+
+export interface PreservedEventState {
+	checked: boolean;
+	inlineAnnotation: string;
+	nestedAnnotations: string[];
+	originalLine: string;
+}
 
 function markerBlock(body: string): string {
 	return `${MARKER_START}\n${body}\n${MARKER_END}`;
 }
 
-export function fileNameFor(date: Moment): string {
-	return `${date.format("YYYYMMDD")}.md`;
+export function fileNameFor(date: Moment, format = "YYYYMMDD"): string {
+	return `${date.format(format)}.md`;
 }
 
 export function notePathFor(settings: ObcaldianSettings, date: Moment): string {
 	const folder = settings.dailyNoteFolder?.trim();
-	const fileName = fileNameFor(date);
+	const fileName = fileNameFor(date, settings.dailyNoteFormat);
 	return normalizePath(folder ? `${folder}/${fileName}` : fileName);
 }
 
@@ -43,34 +61,172 @@ export async function ensureDailyNote(
 		return existing;
 	}
 
-	if (!settings.templatePath) {
-		throw new Error("Set a template file in Obcaldian settings first.");
+	const rendered = await renderNewDailyNoteContent(vault, settings, date);
+
+	const parentPath = path.includes("/") ? path.slice(0, path.lastIndexOf("/")) : "";
+	if (parentPath && !vault.getAbstractFileByPath(normalizePath(parentPath))) {
+		await vault.createFolder(normalizePath(parentPath));
 	}
+
+	return vault.create(path, rendered);
+}
+
+export async function renderNewDailyNoteContent(
+	vault: Vault,
+	settings: ObcaldianSettings,
+	date: Moment
+): Promise<string> {
+	if (!settings.templatePath) throw new Error("Set a template file in Obcaldian settings first.");
 	const templateFile = vault.getAbstractFileByPath(normalizePath(settings.templatePath));
 	if (!(templateFile instanceof TFile)) {
 		throw new Error(`Template file not found: ${settings.templatePath}`);
 	}
-
 	const templateContent = await vault.read(templateFile);
 	if (!templateContent.includes(CALENDAR_TOKEN)) {
 		throw new Error(
 			`Your template is missing ${CALENDAR_TOKEN}. Add it where the synced calendar should appear; no note was created.`
 		);
 	}
-	const rendered = templateContent
+	return templateContent
 		.replace(/\{\{date\}\}/g, date.format("YYYY-MM-DD"))
 		.replace(CALENDAR_TOKEN, markerBlock(PLACEHOLDER_BODY));
+}
 
-	const folder = settings.dailyNoteFolder?.trim();
-	if (folder && !vault.getAbstractFileByPath(normalizePath(folder))) {
-		await vault.createFolder(normalizePath(folder));
+/** Explicit creation result for callers that need to distinguish an existing note safely. */
+export async function ensureDailyNoteResult(
+	vault: Vault,
+	settings: ObcaldianSettings,
+	date: Moment
+): Promise<EnsuredDailyNote> {
+	const path = notePathFor(settings, date);
+	const existing = vault.getAbstractFileByPath(path);
+	if (existing instanceof TFile) return { file: existing, created: false };
+	return { file: await ensureDailyNote(vault, settings, date), created: true };
+}
+
+export function calendarSectionFromContent(content: string): string | null {
+	const startIndex = content.indexOf(MARKER_START);
+	const endIndex =
+		startIndex === -1 ? -1 : content.indexOf(MARKER_END, startIndex + MARKER_START.length);
+	if (startIndex === -1 || endIndex === -1) return null;
+	return content.slice(startIndex + MARKER_START.length, endIndex).replace(/^\n|\n$/g, "");
+}
+
+export function replaceCalendarSectionContent(content: string, renderedBlock: string): string | null {
+	const startIndex = content.indexOf(MARKER_START);
+	const endIndex =
+		startIndex === -1 ? -1 : content.indexOf(MARKER_END, startIndex + MARKER_START.length);
+	if (startIndex === -1 || endIndex === -1) return null;
+	const before = content.slice(0, startIndex);
+	const after = content.slice(endIndex + MARKER_END.length);
+	return `${before}${markerBlock(renderedBlock)}${after}`;
+}
+
+/** Reads checkbox state and explicitly attached inline/indented user annotations. */
+export function extractPreservedEvents(content: string): Map<string, PreservedEventState> {
+	const section = calendarSectionFromContent(content) ?? content;
+	const lines = section.split("\n");
+	const preserved = new Map<string, PreservedEventState>();
+	for (let index = 0; index < lines.length; index += 1) {
+		const line = lines[index];
+		const eventKey = eventKeyFromMarkerLine(line);
+		if (!eventKey) continue;
+		const markerEnd = line.indexOf(" -->", line.indexOf("<!-- obcaldian:event:"));
+		const inlineAnnotation = markerEnd === -1 ? "" : line.slice(markerEnd + 4).trim();
+		const nestedAnnotations: string[] = [];
+		for (let next = index + 1; next < lines.length; next += 1) {
+			const candidate = lines[next];
+			if (!/^(?: {2,}|\t)\S/.test(candidate) || /^\s*\[\^/.test(candidate)) break;
+			nestedAnnotations.push(candidate);
+			index = next;
+		}
+		preserved.set(eventKey, {
+			checked: /^\s*- \[[xX]\]/.test(line),
+			inlineAnnotation,
+			nestedAnnotations,
+			originalLine: line,
+		});
 	}
-
-	return vault.create(path, rendered);
+	return preserved;
 }
 
 const FOOTNOTE_CONTINUATION_INDENT = "    ";
 const MIN_ATTENDEES_TO_LIST = 3;
+
+function safeInlineText(value: string): string {
+	return value
+		.replace(/\r?\n/g, " ")
+		.replace(/\s+/g, " ")
+		.trim()
+		.replace(/\\/g, "\\\\")
+		.replace(/([`*_{}[\]()#+!|<>])/g, "\\$1");
+}
+
+function safeMultilineText(value: string): string {
+	return value
+		.replace(/\r\n?/g, "\n")
+		.split("\n")
+		.map((line) => safeInlineText(line))
+		.filter(Boolean)
+		.join(`\n${FOOTNOTE_CONTINUATION_INDENT}`);
+}
+
+function safeGoogleEventUrl(rawUrl: string | undefined): string | null {
+	if (!rawUrl) return null;
+	try {
+		const url = new URL(rawUrl);
+		if (
+			url.protocol !== "https:" ||
+			url.username ||
+			url.password ||
+			!["calendar.google.com", "www.google.com"].includes(url.hostname)
+		) {
+			return null;
+		}
+		return url.toString();
+	} catch {
+		return null;
+	}
+}
+
+function safeMeetingUrl(rawUrl: string | undefined): string | null {
+	if (!rawUrl) return null;
+	try {
+		const url = new URL(rawUrl);
+		return url.protocol === "https:" && !url.username && !url.password ? url.toString() : null;
+	} catch {
+		return null;
+	}
+}
+
+function calendarClass(calendarId: string): string {
+	let hash = 2_166_136_261;
+	for (let index = 0; index < calendarId.length; index += 1) {
+		hash ^= calendarId.charCodeAt(index);
+		hash = Math.imul(hash, 16_777_619);
+	}
+	return `obcaldian-calendar-${(hash >>> 0).toString(36)}`;
+}
+
+export function eventIsIncluded(event: GoogleEvent, rendering: RenderingSettings): boolean {
+	if (event.status === "cancelled" && !rendering.includeCancelled) return false;
+	if (event.transparency === "transparent" && !rendering.includeFreeEvents) return false;
+	if (
+		!rendering.includeDeclined &&
+		event.attendees?.some(
+			(attendee) => attendee.self && attendee.responseStatus === "declined"
+		)
+	) {
+		return false;
+	}
+	const enabledEventTypes: Record<string, boolean> = {
+		focusTime: rendering.includeFocusTime,
+		outOfOffice: rendering.includeOutOfOffice,
+		workingLocation: rendering.includeWorkingLocation,
+		birthday: rendering.includeBirthdays,
+	};
+	return event.eventType === undefined || enabledEventTypes[event.eventType] !== false;
+}
 
 /**
  * Builds a footnote's body for an event: its description (if any), plus a
@@ -78,14 +234,25 @@ const MIN_ATTENDEES_TO_LIST = 3;
  * after the first are indented so markdown treats them as part of the same
  * footnote definition. Returns null when there's nothing worth footnoting.
  */
-function footnoteBody(ev: GoogleEvent): string | null {
+function footnoteBody(ev: GoogleEvent, rendering: RenderingSettings): string | null {
 	const parts: string[] = [];
 	const description = ev.description?.trim();
-	if (description) parts.push(description);
+	if (description && rendering.showDescriptions) parts.push(safeMultilineText(description));
+	if (ev.location?.trim() && rendering.showLocations) {
+		parts.push(`Location: ${safeInlineText(ev.location)}`);
+	}
+	const meetingUrl = rendering.showMeetingLinks ? safeMeetingUrl(ev.hangoutLink) : null;
+	if (meetingUrl) parts.push(`Meeting: ${meetingUrl}`);
 
 	const attendees = ev.attendees ?? [];
-	if (attendees.length >= MIN_ATTENDEES_TO_LIST) {
-		const names = attendees.map((a) => a.displayName?.trim() || a.email).join(", ");
+	if (rendering.showAttendees && attendees.length >= MIN_ATTENDEES_TO_LIST) {
+		const names = attendees
+			.map((attendee) => {
+				const displayName = attendee.displayName?.trim();
+				if (displayName) return safeInlineText(displayName);
+				return rendering.includeAttendeeEmails ? safeInlineText(attendee.email) : "Attendee";
+			})
+			.join(", ");
 		parts.push(`Participants: ${names}`);
 	}
 
@@ -94,20 +261,39 @@ function footnoteBody(ev: GoogleEvent): string | null {
 }
 
 /** Formats a timed event's start (and end, if distinct) as "HH:mm" or "HH:mm-HH:mm". Null for all-day events. */
-function formatTime(dateTime: string, timeZone: string): string {
-	return new Intl.DateTimeFormat("en-GB", {
+function formatTime(
+	dateTime: string,
+	timeZone: string,
+	rendering: RenderingSettings
+): string {
+	const locale = rendering.locale === "system" ? undefined : rendering.locale;
+	const options: Intl.DateTimeFormatOptions = {
 		timeZone,
 		hour: "2-digit",
 		minute: "2-digit",
-		hourCycle: "h23",
-	}).format(new Date(dateTime));
+		...(rendering.hourCycle === "12" ? { hour12: true } : {}),
+		...(rendering.hourCycle === "24" ? { hourCycle: "h23" as const } : {}),
+	};
+	try {
+		return new Intl.DateTimeFormat(locale, options).format(new Date(dateTime));
+	} catch {
+		return new Intl.DateTimeFormat(undefined, options).format(new Date(dateTime));
+	}
 }
 
-function formatTimeRange(ev: GoogleEvent, timeZone: string): string | null {
+function formatTimeRange(
+	ev: GoogleEvent,
+	timeZone: string,
+	rendering: RenderingSettings
+): string | null {
 	if (!ev.start.dateTime) return null;
-	const start = formatTime(ev.start.dateTime, timeZone);
-	const end = ev.end.dateTime ? formatTime(ev.end.dateTime, timeZone) : null;
-	return end && end !== start ? `${start}-${end}` : start;
+	const start = formatTime(ev.start.dateTime, timeZone, rendering);
+	const end =
+		rendering.showEndTime && ev.end.dateTime
+			? formatTime(ev.end.dateTime, timeZone, rendering)
+			: null;
+	const separator = safeInlineText(rendering.timeSeparator) || "-";
+	return end && end !== start ? `${start}${separator}${end}` : start;
 }
 
 export function renderCalendarBlock(
@@ -115,39 +301,84 @@ export function renderCalendarBlock(
 	eventsByCalendar: Map<string, GoogleEvent[]>,
 	timeZone = Intl.DateTimeFormat().resolvedOptions().timeZone,
 	renderDate?: string,
-	checkedEventKeys: ReadonlySet<string> = new Set()
+	checkedEventKeys: ReadonlySet<string> = new Set(),
+	rendering: RenderingSettings = DEFAULT_RENDERING_SETTINGS,
+	preservedEvents: ReadonlyMap<string, PreservedEventState> = new Map(),
+	suppressOrphanKeys: ReadonlySet<string> = new Set()
 ): string {
 	const lines: string[] = [];
 	const footnotes: string[] = [];
+	const renderedEventKeys = new Set<string>();
 	let footnoteCount = 0;
 
 	for (const cal of calendars) {
 		if (!cal.enabled) continue;
-		const events = eventsByCalendar.get(cal.id) ?? [];
+		const events = (eventsByCalendar.get(cal.id) ?? [])
+			.filter((event) => eventIsIncluded(event, rendering))
+			.sort((left, right) => {
+				if (rendering.allDayFirst) {
+					const allDayOrder = Number(Boolean(right.start.date)) - Number(Boolean(left.start.date));
+					if (allDayOrder) return allDayOrder;
+				}
+				return (left.start.dateTime ?? left.start.date ?? "").localeCompare(
+					right.start.dateTime ?? right.start.date ?? ""
+				);
+			});
 		if (events.length === 0) continue;
-		lines.push(`**${cal.summary}**`);
+		const classes = ["obcaldian-calendar-label", calendarClass(cal.id)];
+		if (rendering.useGoogleCalendarColors && cal.colorId && /^\d{1,2}$/.test(cal.colorId)) {
+			classes.push(`obcaldian-calendar-color-${cal.colorId}`);
+		}
+		lines.push(`<span class="${classes.join(" ")}"></span> **${safeInlineText(cal.summary)}**`);
 		for (const ev of events) {
 			const span = multiDaySpan(ev, timeZone);
-			const eventKey = span && ev.id ? multiDayEventKey(cal.id, ev.id) : null;
-			const checked = eventKey ? checkedEventKeys.has(eventKey) : false;
+			const eventKey = eventOccurrenceKey(cal.id, ev);
+			const previous = eventKey ? preservedEvents.get(eventKey) : undefined;
+			const checked = eventKey
+				? checkedEventKeys.has(eventKey) || Boolean(previous?.checked)
+				: false;
 			const bullet = cal.addAs === "checkbox" ? (checked ? "- [x]" : "- [ ]") : "-";
-			const time = formatTimeRange(ev, timeZone);
-			const rawTitle = ev.summary || "(untitled event)";
-			const title = ev.htmlLink ? `[${rawTitle}](${ev.htmlLink})` : rawTitle;
+			const time = formatTimeRange(ev, timeZone, rendering);
+			const isPrivate = ev.visibility === "private" || ev.visibility === "confidential";
+			const rawTitle =
+				rendering.redactPrivateEvents && isPrivate
+					? "Busy"
+					: ev.summary || "(untitled event)";
+			const safeTitle = safeInlineText(rawTitle);
+			const htmlLink = safeGoogleEventUrl(ev.htmlLink);
+			const title = htmlLink ? `[${safeTitle}](${htmlLink})` : safeTitle;
 			const dayNumber = span && renderDate ? dayNumberInSpan(renderDate, span) : null;
 			const dayLabel = dayNumber ? ` (Day ${dayNumber}/${span?.totalDays})` : "";
-			const identityMarker = eventKey ? ` ${multiDayEventMarker(eventKey)}` : "";
+			const identityMarker = eventKey ? ` ${eventMarker(eventKey)}` : "";
 
 			let footnoteMarker = "";
-			const body = footnoteBody(ev);
+			const body = rendering.redactPrivateEvents && isPrivate ? null : footnoteBody(ev, rendering);
 			if (body) {
 				footnoteCount += 1;
-				footnoteMarker = `[^${footnoteCount}]`;
-				footnotes.push(`[^${footnoteCount}]: ${body}`);
+				footnoteMarker = `[^obcaldian-${footnoteCount}]`;
+				footnotes.push(`[^obcaldian-${footnoteCount}]: ${body}`);
 			}
 
-			const eventText = `${title}${dayLabel}${footnoteMarker}${identityMarker}`;
+			const annotation = previous?.inlineAnnotation
+				? ` ${previous.inlineAnnotation}`
+				: "";
+			const eventText = `${title}${dayLabel}${footnoteMarker}${identityMarker}${annotation}`;
 			lines.push(time ? `${bullet} ${time} ${eventText}` : `${bullet} ${eventText}`);
+			if (previous?.nestedAnnotations.length) lines.push(...previous.nestedAnnotations);
+			if (eventKey) renderedEventKeys.add(eventKey);
+		}
+	}
+	const orphanedAnnotations = [...preservedEvents.entries()].filter(
+		([eventKey, state]) =>
+			!renderedEventKeys.has(eventKey) &&
+			!suppressOrphanKeys.has(eventKey) &&
+			(Boolean(state.inlineAnnotation) || state.nestedAnnotations.length > 0)
+	);
+	if (orphanedAnnotations.length > 0) {
+		lines.push("", "**Unmatched calendar annotations**");
+		for (const [, state] of orphanedAnnotations) {
+			lines.push(state.originalLine, ...state.nestedAnnotations);
+			lines.push("  > Event no longer returned by Google; annotation preserved.");
 		}
 	}
 	if (lines.length === 0) {
@@ -170,18 +401,13 @@ export async function syncNoteCalendarSection(
 	notify = true
 ): Promise<boolean> {
 	const content = await vault.read(file);
-	const startIdx = content.indexOf(MARKER_START);
-	const endIdx =
-		startIdx === -1 ? -1 : content.indexOf(MARKER_END, startIdx + MARKER_START.length);
-	if (startIdx === -1 || endIdx === -1) {
+	const next = replaceCalendarSectionContent(content, renderedBlock);
+	if (next === null) {
 		if (notify) {
 			new Notice(`Obcaldian: calendar markers not found in ${file.path}, skipping.`);
 		}
 		return false;
 	}
-	const before = content.slice(0, startIdx);
-	const after = content.slice(endIdx + MARKER_END.length);
-	const next = `${before}${markerBlock(renderedBlock)}${after}`;
 	await vault.modify(file, next);
 	return true;
 }

@@ -3,6 +3,9 @@
 An Obsidian plugin (desktop only) that generates daily notes from your own template and keeps a
 plugin-managed section of each note synced with selected Google Calendars.
 
+The plugin runs locally without analytics, telemetry, a publisher proxy, or a hosted backend. See
+[Privacy and data handling](PRIVACY.md) and the [security policy](SECURITY.md).
+
 ## Features
 
 - Creates a daily note from a template you write, on demand or via ribbon icon/commands.
@@ -12,12 +15,19 @@ plugin-managed section of each note synced with selected Google Calendars.
   a participant list.
 - Event times are computed against a configurable IANA timezone (defaults to your system's), so
   sync stays correct even if your calendar and machine disagree.
-- Sync today plus a configurable number of days ahead, or run a one-off "Sync next N days" from the
+- Sync today plus a configurable number of days ahead, or run a past/future date range from the
   command palette.
 - Quiet background calendar checks, every three hours by default on new installations and fully
   configurable (including off).
 - Google client secret and OAuth tokens are stored in Obsidian's own secret storage, never in plain
   text in your vault's `data.json`.
+- Manual sync preview, managed-section diffs, and one-session undo that never replaces content
+  outside the calendar markers.
+- Stable event identity preserves single- and multi-day checkboxes and attached annotations,
+  including when a recurring occurrence moves.
+- Privacy-aware filters and rendering controls for event details, visibility, availability, event
+  types, time format, ordering, and calendar colors.
+- Incremental Google sync tokens and a local event cache reduce background API traffic.
 
 ## Setup
 
@@ -58,6 +68,8 @@ In Settings → Obcaldian:
 - **Timezone** — defaults to your system timezone; only change it if your calendar should be
   queried in a different zone than the machine you're running Obsidian on.
 - **Days ahead to sync** — how far past today "Sync now" reaches.
+- **Reuse core Daily Notes settings** — optionally copy its folder, template, and filename format.
+- **Missing notes** — choose whether range sync creates notes or updates existing notes only.
 
 ### 4. Connect a Google account
 
@@ -102,12 +114,11 @@ small, free "app" in Google Cloud that only you use.
    > the user type to **Internal** in step 2 above; internal apps skip verification and the 7-day
    > expiry entirely, but are restricted to accounts in your Workspace org.
 
-#### 4d. Create the OAuth client
+#### 4d. Create and download the OAuth client
 
 1. Go to **APIs & Services → Credentials → Create Credentials → OAuth client ID**.
 2. Application type: **Desktop app**. Give it any name.
-3. Click **Create**, then copy the generated **Client ID** and **Client secret** from the dialog
-   (or the credentials list afterwards).
+3. Click **Create**, then use **Download JSON** from the credentials list. Keep this file private.
 
    Desktop-app clients don't need a redirect URI configured in the console — Google allows any
    loopback address automatically. Obcaldian's local callback server listens on
@@ -115,7 +126,9 @@ small, free "app" in Google Cloud that only you use.
 
 #### 4e. Connect in Obsidian
 
-1. In Settings → Obcaldian, paste the Client ID and Client secret into their fields.
+1. In Settings → Obcaldian, click **Import JSON** and select the downloaded desktop credentials.
+   Obcaldian extracts the client/project identity and secret, then discards the source file and
+   path. Manual Client ID/secret fields remain available as a fallback.
 2. Click **Connect**. This opens your system browser to Google's consent screen; approve access
    (you'll hit the "unverified app" warning here if you published the app per 4c, or you'll just
    sign in directly if it's still in Testing and you're the test user).
@@ -124,18 +137,26 @@ small, free "app" in Google Cloud that only you use.
 4. Click **Refresh** under Calendars, then toggle on the calendars you want synced and choose how
    each one's events should be added (`- [ ]` checkbox or `-` bullet).
 
-Both the Client Secret and the resulting OAuth tokens are stored in Obsidian's secret storage, not
+The client secret and resulting OAuth tokens are stored in Obsidian's secret storage, not
 in your vault's `data.json`.
 
 ## Commands
 
 - **Open today's daily note** / **Open tomorrow's daily note**
 - **Sync Google calendars now** — syncs today plus the configured days ahead.
-- **Sync next N days...** — prompts for a day count and syncs that range once, without changing
+- **Sync upcoming days...** — prompts for a day count and syncs that range once, without changing
   your default.
+- **Sync calendar date range...** — supports past/future dates, preview, and existing-only mode.
+- **Sync calendar for this note** — resolves the active daily note using the configured format.
+- **Repair calendar section** — previews and appends missing markers to the active note.
+- **Undo last calendar sync** — restores managed sections from the last manual sync in this
+  session, skipping sections changed afterward.
+- **Copy redacted diagnostics** — copies versions, platform/configuration, permitted hosts, and
+  categorized failures without credentials or calendar/event content.
 
-All four commands also have ribbon icons for quick access: today, tomorrow, sync now, and a
-one-off range sync. You can hide unwanted ribbon actions using Obsidian's ribbon configuration.
+Four common actions have ribbon icons: today, tomorrow, sync now, and upcoming days. You can hide
+unwanted ribbon actions using Obsidian's ribbon configuration. Manual calendar syncs show a preview;
+background syncs stay quiet and share the same coordinator so they cannot overlap a manual write.
 
 ## Multi-day events
 
@@ -173,15 +194,42 @@ matched reliably during the first sync after upgrading. Once the new marker has 
 future state is preserved. Propagation applies to checkbox calendars; bullet calendars still get
 the day annotation but have no completion state.
 
+## Event annotations
+
+Every identified event has an invisible marker. Text added after that marker on the same line, or
+non-empty lines indented beneath the event, is treated as a user annotation and carried across
+syncs. For example:
+
+```markdown
+- [x] 09:00 Standup <!-- obcaldian:event:... --> send recap
+  - Decision: ship on Friday
+```
+
+If an occurrence moves and its prior location is available in the local cache, the annotation is
+reattached on the new date. If an annotated event is deleted or filtered, the annotation remains
+under **Unmatched calendar annotations** instead of being silently discarded.
+
+## Sync safety and caching
+
+Calendar requests and every target note are preflighted before a write. The plan is checked again
+after preview; if a note changed meanwhile, sync stops safely. Vault failures trigger rollback of
+earlier writes. Transient quota/server errors use bounded retries with `Retry-After` support.
+
+The first sync builds a per-calendar event cache and stores Google's incremental token. Later syncs
+request changes only; an expired token automatically triggers a full rebuild. Cache contents stay
+local in Obsidian's plugin data and can include event metadata.
+
 ## Development
 
 - `npm run dev` — esbuild in watch mode.
 - `npm run build` — type-checks (`tsc -noEmit`) and produces a minified production build.
+- `npm run lint` — runs the official Obsidian plugin rules.
 - `npm test` — runs the test suite.
 - `npm run validate:release` — validates publication files and version metadata after a build.
 - `npm run check` — runs the production build, tests, and release validation used by CI.
 
-CI tests Node.js 20 and 22 and uploads an installable plugin artifact. Tag builds additionally
+CI tests Node.js 20 and 22, compiles against Obsidian 1.11.4 and the latest API, and uploads an
+installable plugin artifact. Tag builds additionally
 require the tag to exactly match `manifest.json`, generate a provenance attestation, and create a
 draft GitHub release for final review.
 

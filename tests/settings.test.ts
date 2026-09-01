@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { DEFAULT_SETTINGS } from "../src/settings";
+import { DEFAULT_SETTINGS, SETTINGS_SCHEMA_VERSION, loadSettingsData } from "../src/settings";
 
 describe("DEFAULT_SETTINGS", () => {
 	it("defaults timezone to the system's IANA zone", () => {
@@ -22,5 +22,34 @@ describe("DEFAULT_SETTINGS", () => {
 	it("no longer carries a plaintext client secret or token fields", () => {
 		expect(DEFAULT_SETTINGS).not.toHaveProperty("googleClientSecret");
 		expect(DEFAULT_SETTINGS).not.toHaveProperty("tokens");
+	});
+});
+
+describe("loadSettingsData", () => {
+	it("migrates legacy data and repairs malformed nested values", () => {
+		const loaded = loadSettingsData({
+			googleClientId: "  client  ",
+			syncDaysAhead: -4,
+			calendars: [
+				{ id: "work", summary: "Work", enabled: true, addAs: "invalid" },
+				{ id: "work", summary: "Duplicate", enabled: true, addAs: "bullet" },
+			],
+			multiDayCompletionRules: {
+				good: { completedFrom: "2026-01-01", eventEnd: "2026-01-02" },
+				bad: { completedFrom: "later", eventEnd: "earlier" },
+			},
+			rendering: { hourCycle: "impossible", showDescriptions: false },
+		});
+		expect(loaded.changed).toBe(true);
+		expect(loaded.settings.schemaVersion).toBe(SETTINGS_SCHEMA_VERSION);
+		expect(loaded.settings.googleClientId).toBe("client");
+		expect(loaded.settings.syncDaysAhead).toBe(DEFAULT_SETTINGS.syncDaysAhead);
+		expect(loaded.settings.calendars).toHaveLength(1);
+		expect(loaded.settings.calendars[0].addAs).toBe("checkbox");
+		expect(loaded.settings.multiDayCompletionRules).toEqual({
+			good: { completedFrom: "2026-01-01", eventEnd: "2026-01-02" },
+		});
+		expect(loaded.settings.rendering.hourCycle).toBe("24");
+		expect(loaded.settings.rendering.showDescriptions).toBe(false);
 	});
 });

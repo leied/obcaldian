@@ -14,6 +14,7 @@ never edit it directly; edit `src/*.ts`.
 - `npm run dev` — esbuild in watch mode, unminified with inline sourcemaps (writes `main.js`).
 - `npm run build` — type-checks with `tsc -noEmit -skipLibCheck`, then produces a minified
   production `main.js` via esbuild.
+- `npm run lint` — runs the official `eslint-plugin-obsidianmd` policy rules.
 - `npm test` — runs the vitest suite in `tests/`.
 - `npm run validate:release` — validates publication files and version metadata; when
   `RELEASE_TAG` is set, also requires the tag to exactly match `manifest.json`.
@@ -22,8 +23,9 @@ never edit it directly; edit `src/*.ts`.
   syncs `manifest.json`'s `version` and appends a version-to-minimum-app-version entry to
   `versions.json`. Also stages `manifest.json`/`versions.json`.
 
-There is no lint config. `npm run check` runs in CI (`.github/workflows/ci.yml`) on Node 20 and 22
-for every push/PR to `main`, and the Node 20 job uploads an installable artifact. Pushing any tag
+`npm run check` runs lint, build, tests, and release validation in CI on Node 20 and 22. A separate
+matrix compiles against Obsidian 1.11.4 and the latest API, and the Node 20 job uploads an
+installable artifact. Pushing any tag
 triggers `.github/workflows/release.yml`, which requires the tag to equal the manifest version,
 builds, tests, validates, attests the artifacts, and creates a draft GitHub Release with `main.js`,
 `manifest.json`, `styles.css`, and a zipped copy.
@@ -49,7 +51,9 @@ migration).
 
 Module responsibilities in `src/`, in dependency order:
 
-- **`settings.ts`** — pure types (`ObcaldianSettings`, `CalendarConfig`) and `DEFAULT_SETTINGS`.
+- **`settings.ts`** — persisted types, defaults, sequential schema migrations, and defensive
+  validation/repair. It includes rendering/privacy controls, sync health, failure history, Daily
+  Notes integration, and per-calendar event caches.
   `timezone` defaults to the system's IANA zone (`Intl.DateTimeFormat().resolvedOptions().timeZone`)
   but is user-overridable. Notably absent: the Google client secret and OAuth tokens — those live in
   Obsidian's secret storage, not here (see `googleAuth.ts`), since this object is persisted to
@@ -59,10 +63,11 @@ Module responsibilities in `src/`, in dependency order:
   `multiDayCompletionBehavior` selects independent/ask/automatic-following behavior, while
   `multiDayCompletionRules` persists non-secret `{completedFrom,eventEnd}` decisions so
   occurrences in notes synced later receive the chosen state.
-- **`googleAuth.ts`** — the Google OAuth "installed app" loopback flow: opens the system browser,
-  spins up a local `http` server on `127.0.0.1:42813` to catch the redirect, exchanges the code for
-  tokens, and refreshes access tokens on expiry (`getValidAccessToken`). Requires Node's `http`
-  module directly (via `require`), which is why `manifest.json` sets `isDesktopOnly: true`. All
+- **`googleAuth.ts`** — the Google OAuth "installed app" loopback flow with desktop-credentials JSON
+  import, PKCE, a state nonce, cancellation/timeout, and guaranteed cleanup. It opens the system
+  browser, spins up a local `http` server on `127.0.0.1:42813`, exchanges the code for tokens, and
+  refreshes access tokens on expiry (`getValidAccessToken`). The desktop-only dynamic `node:http`
+  import is why `manifest.json` sets `isDesktopOnly: true`. All
   auth-dependent functions take an `AuthDeps` (`{ settings, saveSettings, secretStorage }`) rather
   than the plugin instance, keeping this module decoupled from `main.ts`.
   - Client secret and access/refresh tokens are stored via `App.secretStorage` (Obsidian API
@@ -74,20 +79,23 @@ Module responsibilities in `src/`, in dependency order:
   - `migrateLegacySecrets` is a one-time migration (called from `main.ts`'s `loadSettings`) that
     lifts a pre-secret-storage `data.json`'s plaintext `googleClientSecret`/`tokens.{accessToken,
     refreshToken,expiresAt}` into secret storage and strips them from the saved settings object.
+- **`network.ts`** — the only production module allowed to call `requestUrl`; enforces the Google
+  host allowlist and bounded, cancellable `429`/`5xx` retries with `Retry-After`, backoff, and jitter.
 - **`timezone.ts`** — pure, no Obsidian dependency. `zonedDayRange(year, month, day, timeZone)`
   resolves the UTC instants for midnight-to-midnight of a given calendar day in an arbitrary IANA
   zone, via `Intl.DateTimeFormat` offset reconstruction (no `moment-timezone` dependency). Used so
   Google Calendar day-boundary queries align with the user's configured `timezone` setting rather
   than assuming it matches the machine's local zone. `isValidTimeZone` backs the settings-tab inline
   validation (see below).
-- **`googleCalendar.ts`** — thin wrappers around the Google Calendar v3 REST API
-  (`listCalendars`, `listEventsForDay`) using Obsidian's `requestUrl` (not `fetch`, to avoid CORS).
-  `listEventsForDay` builds its `timeMin`/`timeMax` from `zonedDayRange` and also passes `timeZone`
-  to the API. Both list endpoints follow Google's `nextPageToken` so results aren't truncated.
+- **`googleCalendar.ts`** — Calendar API wrappers plus a per-calendar full/incremental cache.
+  Initial sync stores `nextSyncToken`, incremental responses update cached occurrences, a `410 Gone`
+  rebuilds the calendar, and requested note days are filtered locally. Pagination is followed in
+  every list path.
   `GoogleEvent` includes `description`, `attendees`, and `htmlLink` (used for footnotes and the
   event link), plus Google's stable event-instance `id` for multi-day identity — all returned by
   the API by default, no extra `fields` param needed.
-- **`multiDay.ts`** — pure date-span and event-identity logic. All-day `end.date` is treated as
+- **`multiDay.ts`** — pure date-span and canonical event-identity logic. Recurring keys combine
+  calendar, series, and immutable original-start identity. All-day `end.date` is treated as
   exclusive; timed spans use the configured timezone and subtract 1ms from the end so an exact
   midnight end doesn't claim the next day. Event markers combine calendar ID and Google event ID.
 - **`dailyNote.ts`** — note file logic with no network calls:
@@ -110,13 +118,16 @@ Module responsibilities in `src/`, in dependency order:
     touches anything outside it) — description first, then a `Participants:` line only once
     attendees reach `MIN_ATTENDEES_TO_LIST` (3). Footnote numbering is a single counter threaded
     across all calendars in one render call.
-  - Multi-day events render `Day N/Total` plus an invisible event marker. Checkbox rendering accepts
-    a set of resolved event keys so sync can preserve or propagate completion state.
-- **`sync.ts`** — orchestrates the above. `syncRange(vault, deps, daysAhead, opts?)` syncs today plus
-  `daysAhead` additional days. It fetches the complete range before any write, groups multi-day
-  checkbox events, scans existing notes across each full event span, resolves the configured
-  completion policy, then renders/writes. `opts.notify` (default `true`) gates every `Notice` — set
-  `false` for a silent run (errors go to `console.error` instead).
+  - Every identified event has an invisible marker. Rendering parses and reattaches checkbox state,
+    same-line annotation text, and indented annotation lines; deleted/filtered annotations remain
+    visible as unmatched rather than being discarded.
+  - Rendering escapes Markdown and marker lookalikes, validates URLs, supports privacy/type/free-busy
+    filters, and applies configurable details, time format, ordering, and CSS color classes.
+- **`sync.ts`** — the serialized sync coordinator. It refreshes each enabled calendar once, builds
+  an in-memory plan, preflights every template/target/marker, offers manual preview, rechecks files
+  after preview, applies writes with rollback, and emits a managed-section-only undo snapshot.
+  Date-range limits, update-existing-only mode, multi-day completion, moved-annotation lookup,
+  per-calendar health, categorized failures, and stale-write protection all live here.
   `SyncOptions.confirmMultiDay` keeps Modal/UI concerns outside this module; it is only called for
   interactive `ask` syncs. `SyncOptions.onStart`/`onSuccess`/`onError` fire regardless of `notify`
   (used by `main.ts` to drive the status bar, independent of whether Notices are shown) — `onError`

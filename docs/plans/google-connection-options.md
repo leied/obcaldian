@@ -1,6 +1,6 @@
 # Plan: Simpler Google Calendar connections
 
-Status: proposed. Researched 2026-08-30.
+Status: user-owned OAuth path implemented 2026-08-31; optional Secret iCal remains an evaluation.
 
 ## App Password decision
 

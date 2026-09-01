@@ -1,4 +1,4 @@
-import { TFile } from "obsidian";
+import { TFile, TFolder } from "obsidian";
 
 /** In-memory stand-in for Obsidian's Vault, covering the handful of methods dailyNote.ts uses. */
 export class FakeVault {
@@ -18,12 +18,20 @@ export class FakeVault {
 		this.folders.add(path);
 	}
 
-	getAbstractFileByPath(path: string): TFile | null {
+	getAbstractFileByPath(path: string): TFile | TFolder | null {
 		if (!this.contents.has(path) && !this.folders.has(path)) return null;
-		if (this.folders.has(path) && !this.contents.has(path)) return null;
+		if (this.folders.has(path) && !this.contents.has(path)) {
+			const folder = new TFolder();
+			folder.path = path;
+			return folder;
+		}
 		const file = new TFile();
 		file.path = path;
 		return file;
+	}
+
+	async delete(file: TFile): Promise<void> {
+		this.contents.delete(file.path);
 	}
 
 	async read(file: TFile): Promise<string> {

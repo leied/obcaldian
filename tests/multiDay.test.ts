@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 import type { GoogleEvent } from "../src/googleCalendar";
 import {
 	dayNumberInSpan,
+	eventOccurrenceKey,
 	isMultiDayEventChecked,
 	multiDayEventKey,
 	multiDayEventMarker,
@@ -54,5 +55,23 @@ describe("multi-day event identity", () => {
 		expect(isMultiDayEventChecked(content, key)).toBe(true);
 		expect(isMultiDayEventChecked(content, multiDayEventKey("work", "other"))).toBe(false);
 		expect(multiDayEventMarker(key)).not.toContain("--123");
+	});
+
+	it("uses immutable original start time when a recurring instance moves", () => {
+		const originalStartTime = { dateTime: "2026-07-22T09:00:00Z" };
+		const before: GoogleEvent = {
+			id: "instance-a",
+			recurringEventId: "series-1",
+			originalStartTime,
+			summary: "Standup",
+			start: { dateTime: "2026-07-22T09:00:00Z" },
+			end: { dateTime: "2026-07-22T09:30:00Z" },
+		};
+		const moved: GoogleEvent = {
+			...before,
+			start: { dateTime: "2026-07-23T12:00:00Z" },
+			end: { dateTime: "2026-07-23T12:30:00Z" },
+		};
+		expect(eventOccurrenceKey("work", moved)).toBe(eventOccurrenceKey("work", before));
 	});
 });

@@ -17,6 +17,26 @@ export class TFile {
 	stat = { ctime: 0, mtime: 0, size: 0 };
 }
 
+export class TFolder {
+	path = "";
+}
+
+export const Platform = {
+	isDesktop: true,
+	isMobile: false,
+	isDesktopApp: true,
+	isMobileApp: false,
+	isIosApp: false,
+	isAndroidApp: false,
+	isPhone: false,
+	isTablet: false,
+	isMacOS: false,
+	isWin: false,
+	isLinux: true,
+};
+
+export const apiVersion = "test";
+
 export class Notice {
 	message: string;
 	/** Every Notice created during a test run, for assertions. Reset with `Notice.instances = []`. */

@@ -4,6 +4,7 @@ import {
 	getClientSecret,
 	isConnected,
 	migrateLegacySecrets,
+	parseGoogleCredentialsJson,
 	setClientSecret,
 	type AuthDeps,
 } from "../src/googleAuth";
@@ -76,5 +77,43 @@ describe("migrateLegacySecrets", () => {
 		const migrated = migrateLegacySecrets(storage, raw);
 		expect(migrated).toBe(false);
 		expect(raw).toEqual({ googleClientId: "abc", tokenExpiresAt: 123 });
+	});
+});
+
+describe("Google credentials JSON import", () => {
+	it("accepts an installed desktop client and exposes only the needed identity", () => {
+		expect(
+			parseGoogleCredentialsJson(
+				JSON.stringify({
+					installed: {
+						client_id: "client.apps.googleusercontent.com",
+						client_secret: "secret",
+						project_id: "my-project",
+						auth_uri: "https://accounts.google.com/o/oauth2/auth",
+						token_uri: "https://oauth2.googleapis.com/token",
+					},
+				})
+			)
+		).toEqual({
+			clientId: "client.apps.googleusercontent.com",
+			clientSecret: "secret",
+			projectId: "my-project",
+		});
+	});
+
+	it("rejects web credentials and unexpected token endpoints", () => {
+		expect(() => parseGoogleCredentialsJson(JSON.stringify({ web: {} }))).toThrow(/Desktop app/i);
+		expect(() =>
+			parseGoogleCredentialsJson(
+				JSON.stringify({
+					installed: {
+						client_id: "client",
+						client_secret: "secret",
+						project_id: "project",
+						token_uri: "https://example.com/token",
+						},
+					})
+				)
+		).toThrow(/unexpected OAuth endpoints/i);
 	});
 });

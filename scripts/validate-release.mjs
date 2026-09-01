@@ -1,4 +1,4 @@
-import { existsSync, readFileSync } from "node:fs";
+import { existsSync, readFileSync, readdirSync } from "node:fs";
 
 function fail(message) {
 	console.error(`Release validation failed: ${message}`);
@@ -51,8 +51,41 @@ if (process.env.RELEASE_TAG && process.env.RELEASE_TAG !== manifest.version) {
 	fail(`release tag ${process.env.RELEASE_TAG} must exactly match ${manifest.version}.`);
 }
 
-for (const path of ["README.md", "LICENSE", "main.js", "manifest.json", "styles.css"]) {
+for (const path of [
+	"README.md",
+	"SECURITY.md",
+	"PRIVACY.md",
+	"LICENSE",
+	"main.js",
+	"manifest.json",
+	"styles.css",
+]) {
 	if (!existsSync(path)) fail(`required publication file ${path} is missing.`);
+}
+
+const sourceFiles = readdirSync("src", { withFileTypes: true })
+	.filter((entry) => entry.isFile() && entry.name.endsWith(".ts"))
+	.map((entry) => `src/${entry.name}`);
+for (const path of sourceFiles.filter((path) => path !== "src/network.ts")) {
+	const source = readFileSync(path, "utf8");
+	if (/\brequestUrl\s*\(/.test(source)) {
+		fail(`${path} bypasses the centralized outbound-host allowlist.`);
+	}
+}
+
+const allowedSourceHosts = new Set([
+	"accounts.google.com",
+	"oauth2.googleapis.com",
+	"www.googleapis.com",
+	"127.0.0.1",
+]);
+for (const path of sourceFiles) {
+	const source = readFileSync(path, "utf8");
+	for (const match of source.matchAll(/https?:\/\/([a-zA-Z0-9.-]+)/g)) {
+		if (!allowedSourceHosts.has(match[1])) {
+			fail(`${path} contains an outbound host that is not approved: ${match[1]}.`);
+		}
+	}
 }
 
 if (!process.exitCode) {

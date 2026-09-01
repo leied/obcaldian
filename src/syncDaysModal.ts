@@ -13,7 +13,7 @@ export class SyncDaysModal extends Modal {
 
 	onOpen(): void {
 		const { contentEl } = this;
-		contentEl.createEl("h3", { text: "Sync next N days" });
+		contentEl.createEl("h3", { text: "Sync upcoming days" });
 
 		new Setting(contentEl)
 			.setName("Days ahead")

@@ -4,15 +4,23 @@ import {
 	connectGoogleAccount,
 	disconnectGoogleAccount,
 	getClientSecret,
+	importGoogleCredentials,
 	isConnected,
 	setClientSecret,
 } from "./googleAuth";
 import { listCalendars } from "./googleCalendar";
 import { syncAll } from "./sync";
 import { isValidTimeZone } from "./timezone";
+import type { RenderingSettings } from "./settings";
+import { PrivacyModal } from "./privacyModal";
+
+type BooleanRenderingKey = {
+	[Key in keyof RenderingSettings]: RenderingSettings[Key] extends boolean ? Key : never;
+}[keyof RenderingSettings];
 
 export class ObcaldianSettingTab extends PluginSettingTab {
 	plugin: ObcaldianPlugin;
+	private connectionAbortController: AbortController | null = null;
 
 	constructor(app: App, plugin: ObcaldianPlugin) {
 		super(app, plugin);
@@ -25,9 +33,31 @@ export class ObcaldianSettingTab extends PluginSettingTab {
 		const settings = this.plugin.settings;
 		const deps = this.plugin.authDeps();
 
-		containerEl.createEl("h2", { text: "Obcaldian" });
-
-		containerEl.createEl("h3", { text: "Daily notes" });
+		new Setting(containerEl).setName("Daily notes").setHeading();
+		new Setting(containerEl)
+			.setName("Reuse core Daily Notes settings")
+			.setDesc("Copy the enabled core plugin's folder, template, and filename format.")
+			.addToggle((toggle) =>
+				toggle.setValue(settings.useDailyNotesSettings).onChange(async (value) => {
+					settings.useDailyNotesSettings = value;
+					await this.plugin.saveSettings();
+					if (value && !(await this.plugin.syncDailyNotesSettings())) {
+						new Notice("Obcaldian: the core Daily Notes plugin is not enabled or configured.");
+					}
+					this.display();
+				})
+			)
+			.addButton((button) =>
+				button
+					.setButtonText("Refresh")
+					.setDisabled(!settings.useDailyNotesSettings)
+					.onClick(async () => {
+						if (!(await this.plugin.syncDailyNotesSettings())) {
+							new Notice("Obcaldian: the core Daily Notes plugin is not enabled or configured.");
+						}
+						this.display();
+					})
+			);
 
 		new Setting(containerEl)
 			.setName("Daily note folder")
@@ -50,6 +80,30 @@ export class ObcaldianSettingTab extends PluginSettingTab {
 					.setValue(settings.templatePath)
 					.onChange(async (value) => {
 						settings.templatePath = value;
+						await this.plugin.saveSettings();
+					})
+			);
+
+		new Setting(containerEl)
+			.setName("Filename format")
+			.setDesc("Moment-style daily note filename format, for example YYYY-MM-DD.")
+			.addText((text) =>
+				text.setValue(settings.dailyNoteFormat).onChange(async (value) => {
+					settings.dailyNoteFormat = value.trim() || "YYYYMMDD";
+					await this.plugin.saveSettings();
+				})
+			);
+
+		new Setting(containerEl)
+			.setName("Missing notes")
+			.setDesc("Choose whether range sync may create notes or only update notes already present.")
+			.addDropdown((dropdown) =>
+				dropdown
+					.addOption("create-missing", "Create missing notes")
+					.addOption("existing-only", "Update existing notes only")
+					.setValue(settings.noteCreationMode)
+					.onChange(async (value) => {
+						settings.noteCreationMode = value as typeof settings.noteCreationMode;
 						await this.plugin.saveSettings();
 					})
 			);
@@ -93,7 +147,49 @@ export class ObcaldianSettingTab extends PluginSettingTab {
 				});
 			});
 
-		containerEl.createEl("h3", { text: "Google account" });
+		new Setting(containerEl).setName("Google account").setHeading();
+		new Setting(containerEl)
+			.setName("Privacy and data handling")
+			.setDesc("Review what is read from Google, written locally, and sent over the network.")
+			.addButton((button) =>
+				button.setButtonText("View policy").onClick(() => new PrivacyModal(this.app).open())
+			);
+
+		const credentialsInput = containerEl.createEl("input", {
+			type: "file",
+			cls: "obcaldian-file-input",
+		});
+		credentialsInput.setAttr("accept", "application/json,.json");
+		credentialsInput.addEventListener("change", () => {
+			void (async () => {
+				const file = credentialsInput.files?.[0];
+				if (!file) return;
+				try {
+					const imported = await importGoogleCredentials(deps, await file.text());
+					new Notice(`Obcaldian: imported credentials for project ${imported.projectId}.`);
+					this.display();
+				} catch (error) {
+					new Notice(`Obcaldian: credentials import failed — ${(error as Error).message}`);
+				} finally {
+					credentialsInput.value = "";
+				}
+			})();
+		});
+
+		new Setting(containerEl)
+			.setName("Import Google credentials JSON")
+			.setDesc(
+				"Recommended: select the downloaded credentials for an OAuth Desktop app. The file and its path are not retained."
+			)
+			.addButton((button) =>
+				button.setButtonText("Import JSON").setCta().onClick(() => credentialsInput.click())
+			);
+
+		if (settings.googleProjectId) {
+			new Setting(containerEl)
+				.setName("Imported Google project")
+				.setDesc(settings.googleProjectId);
+		}
 
 		new Setting(containerEl)
 			.setName("Client ID")
@@ -115,21 +211,35 @@ export class ObcaldianSettingTab extends PluginSettingTab {
 			);
 
 		const connected = isConnected(deps);
-		new Setting(containerEl)
+		const accountSetting = new Setting(containerEl)
 			.setName("Google account")
 			.setDesc(connected ? "Connected" : "Not connected")
 			.addButton((btn) =>
 				btn
-					.setButtonText(connected ? "Reconnect" : "Connect")
+					.setButtonText(
+						this.connectionAbortController
+							? "Connecting..."
+							: connected
+								? "Reconnect"
+								: "Connect"
+					)
+					.setDisabled(this.connectionAbortController !== null)
 					.setCta()
 					.onClick(async () => {
+						const controller = new AbortController();
+						this.connectionAbortController = controller;
+						this.display();
 						try {
-							await connectGoogleAccount(deps);
+							await connectGoogleAccount(deps, { signal: controller.signal });
 							new Notice("Obcaldian: Google account connected.");
 							await this.refreshCalendarList();
-							this.display();
 						} catch (e) {
 							new Notice(`Obcaldian: connection failed — ${(e as Error).message}`);
+						} finally {
+							if (this.connectionAbortController === controller) {
+								this.connectionAbortController = null;
+							}
+							this.display();
 						}
 					})
 			)
@@ -143,8 +253,15 @@ export class ObcaldianSettingTab extends PluginSettingTab {
 						this.display();
 					})
 			);
+		if (this.connectionAbortController) {
+			accountSetting.addButton((button) =>
+				button.setButtonText("Cancel connection").onClick(() => {
+					this.connectionAbortController?.abort();
+				})
+			);
+		}
 
-		containerEl.createEl("h3", { text: "Calendars" });
+		new Setting(containerEl).setName("Calendars").setHeading();
 
 		new Setting(containerEl)
 			.setName("Refresh calendar list")
@@ -186,9 +303,97 @@ export class ObcaldianSettingTab extends PluginSettingTab {
 						await this.plugin.saveSettings();
 					})
 			);
+			row.addExtraButton((button) =>
+				button
+					.setIcon("arrow-up")
+					.setTooltip("Move calendar earlier")
+					.onClick(async () => {
+						const index = settings.calendars.indexOf(cal);
+						if (index <= 0) return;
+						settings.calendars.splice(index - 1, 0, settings.calendars.splice(index, 1)[0]);
+						await this.plugin.saveSettings();
+						this.display();
+					})
+			);
+			row.addExtraButton((button) =>
+				button
+					.setIcon("arrow-down")
+					.setTooltip("Move calendar later")
+					.onClick(async () => {
+						const index = settings.calendars.indexOf(cal);
+						if (index === -1 || index >= settings.calendars.length - 1) return;
+						settings.calendars.splice(index + 1, 0, settings.calendars.splice(index, 1)[0]);
+						await this.plugin.saveSettings();
+						this.display();
+					})
+			);
 		}
 
-		containerEl.createEl("h3", { text: "Sync" });
+		new Setting(containerEl).setName("Rendering and privacy").setHeading();
+		const addRenderingToggle = (
+			name: string,
+			description: string,
+			key: BooleanRenderingKey
+		): void => {
+			new Setting(containerEl)
+				.setName(name)
+				.setDesc(description)
+				.addToggle((toggle) =>
+					toggle.setValue(settings.rendering[key]).onChange(async (value) => {
+						settings.rendering[key] = value;
+						await this.plugin.saveSettings();
+					})
+				);
+		};
+		addRenderingToggle("All-day events first", "Group all-day events before timed events.", "allDayFirst");
+		addRenderingToggle("Descriptions", "Persist event descriptions in footnotes.", "showDescriptions");
+		addRenderingToggle("Attendees", "Persist attendee lists for events with at least three attendees.", "showAttendees");
+		addRenderingToggle("Attendee email addresses", "Use email addresses when an attendee has no display name.", "includeAttendeeEmails");
+		addRenderingToggle("Locations", "Persist event locations in footnotes.", "showLocations");
+		addRenderingToggle("Meeting links", "Persist HTTPS meeting links in footnotes.", "showMeetingLinks");
+		addRenderingToggle("Redact private events", "Render private and confidential events as Busy without details.", "redactPrivateEvents");
+		addRenderingToggle("Declined events", "Include events that you declined.", "includeDeclined");
+		addRenderingToggle("Cancelled events", "Include cancelled occurrences.", "includeCancelled");
+		addRenderingToggle("Free events", "Include events marked transparent/free.", "includeFreeEvents");
+		addRenderingToggle("Focus time", "Include Google focus-time events.", "includeFocusTime");
+		addRenderingToggle("Out of office", "Include Google out-of-office events.", "includeOutOfOffice");
+		addRenderingToggle("Working location", "Include Google working-location events.", "includeWorkingLocation");
+		addRenderingToggle("Birthdays", "Include Google birthday events.", "includeBirthdays");
+		addRenderingToggle("Calendar colors", "Show Google calendar colors using theme-aware CSS classes.", "useGoogleCalendarColors");
+		new Setting(containerEl)
+			.setName("Time locale")
+			.setDesc("BCP 47 locale, or system to use the operating-system locale.")
+			.addText((text) =>
+				text.setValue(settings.rendering.locale).onChange(async (value) => {
+					settings.rendering.locale = value.trim() || "system";
+					await this.plugin.saveSettings();
+				})
+			);
+		new Setting(containerEl)
+			.setName("Clock")
+			.addDropdown((dropdown) =>
+				dropdown
+					.addOption("system", "System default")
+					.addOption("12", "12-hour")
+					.addOption("24", "24-hour")
+					.setValue(settings.rendering.hourCycle)
+					.onChange(async (value) => {
+						settings.rendering.hourCycle = value as typeof settings.rendering.hourCycle;
+						await this.plugin.saveSettings();
+					})
+			);
+		addRenderingToggle("End times", "Show an event's end time when available.", "showEndTime");
+		new Setting(containerEl)
+			.setName("Time range separator")
+			.setDesc("Text placed between start and end times.")
+			.addText((text) =>
+				text.setValue(settings.rendering.timeSeparator).onChange(async (value) => {
+					settings.rendering.timeSeparator = value.slice(0, 8) || "-";
+					await this.plugin.saveSettings();
+				})
+			);
+
+		new Setting(containerEl).setName("Sync").setHeading();
 		new Setting(containerEl)
 			.setName("When a multi-day event is checked")
 			.setDesc(
@@ -258,6 +463,25 @@ export class ObcaldianSettingTab extends PluginSettingTab {
 					}
 				});
 			});
+
+		const failedCalendars = settings.calendars.filter(
+			(calendar) => settings.calendarHealth[calendar.id]?.lastFailureAt
+		).length;
+		new Setting(containerEl)
+			.setName("Sync health")
+			.setDesc(
+				`Last successful sync: ${settings.lastSuccessfulSyncAt ? window.moment(settings.lastSuccessfulSyncAt).fromNow() : "never"}. ${failedCalendars} calendar(s) have a recorded failure.`
+			);
+		new Setting(containerEl)
+			.setName("Diagnostics")
+			.setDesc(
+				"Copy versions, platform, timezone, note configuration, network hosts, and categorized failures. Credentials and calendar content are excluded."
+			)
+			.addButton((button) =>
+				button.setButtonText("Copy diagnostics").onClick(async () => {
+					await this.plugin.copyDiagnostics();
+				})
+			);
 	}
 
 	private async refreshCalendarList(): Promise<void> {
@@ -272,6 +496,8 @@ export class ObcaldianSettingTab extends PluginSettingTab {
 					summary: f.summary,
 					enabled: existing?.enabled ?? false,
 					addAs: existing?.addAs ?? "checkbox",
+					colorId: f.colorId ?? existing?.colorId,
+					color: f.backgroundColor ?? existing?.color,
 				};
 			});
 			await this.plugin.saveSettings();

@@ -2,6 +2,7 @@ import moment from "moment";
 import { describe, expect, it } from "vitest";
 import {
 	ensureDailyNote,
+	extractPreservedEvents,
 	fileNameFor,
 	notePathFor,
 	renderCalendarBlock,
@@ -13,6 +14,8 @@ import { DEFAULT_SETTINGS } from "../src/settings";
 import { FakeVault } from "./fakeVault";
 
 const DATE = moment("2026-07-22");
+const WORK_HEADING =
+	'<span class="obcaldian-calendar-label obcaldian-calendar-pexppc"></span> **Work**';
 
 describe("fileNameFor / notePathFor", () => {
 	it("names the file YYYYMMDD.md", () => {
@@ -45,7 +48,7 @@ describe("renderCalendarBlock", () => {
 			{ summary: "Standup", start: { dateTime: "2026-07-22T09:00:00Z" }, end: {} },
 		];
 		const block = renderCalendarBlock(calendars, new Map([["work", events]]));
-		expect(block).toBe("**Work**\n- [ ] 09:00 Standup");
+		expect(block).toBe(`${WORK_HEADING}\n- [ ] 09:00 Standup`);
 	});
 
 	it("renders a start-end time range when both are known and differ", () => {
@@ -57,7 +60,7 @@ describe("renderCalendarBlock", () => {
 			},
 		];
 		const block = renderCalendarBlock(calendars, new Map([["work", events]]));
-		expect(block).toBe("**Work**\n- [ ] 09:00-09:30 Standup");
+		expect(block).toBe(`${WORK_HEADING}\n- [ ] 09:00-09:30 Standup`);
 	});
 
 	it("renders timed events in the configured timezone", () => {
@@ -73,7 +76,7 @@ describe("renderCalendarBlock", () => {
 			new Map([["work", events]]),
 			"America/Los_Angeles"
 		);
-		expect(block).toBe("**Work**\n- [ ] 02:00-02:30 Breakfast");
+		expect(block).toBe(`${WORK_HEADING}\n- [ ] 02:00-02:30 Breakfast`);
 	});
 
 	it("collapses the range to a single time when start and end match", () => {
@@ -85,7 +88,7 @@ describe("renderCalendarBlock", () => {
 			},
 		];
 		const block = renderCalendarBlock(calendars, new Map([["work", events]]));
-		expect(block).toBe("**Work**\n- [ ] 09:00 Instant");
+		expect(block).toBe(`${WORK_HEADING}\n- [ ] 09:00 Instant`);
 	});
 
 	it("links the title to the event's htmlLink when present", () => {
@@ -99,7 +102,7 @@ describe("renderCalendarBlock", () => {
 		];
 		const block = renderCalendarBlock(calendars, new Map([["work", events]]));
 		expect(block).toBe(
-			"**Work**\n- [ ] 09:00 [Standup](https://calendar.google.com/event?eid=abc123)"
+			`${WORK_HEADING}\n- [ ] 09:00 [Standup](https://calendar.google.com/event?eid=abc123)`
 		);
 	});
 
@@ -120,7 +123,7 @@ describe("renderCalendarBlock", () => {
 		];
 		const block = renderCalendarBlock(calendars, new Map([["work", events]]));
 		expect(block).toBe(
-			"**Work**\n- [ ] 14:00 Planning[^1]\n\n[^1]: Quarterly roadmap review."
+			`${WORK_HEADING}\n- [ ] 14:00 Planning[^obcaldian-1]\n\n[^obcaldian-1]: Quarterly roadmap review.`
 		);
 	});
 
@@ -134,7 +137,7 @@ describe("renderCalendarBlock", () => {
 			},
 		];
 		const block = renderCalendarBlock(calendars, new Map([["work", events]]));
-		expect(block).toBe("**Work**\n- [ ] 1:1");
+		expect(block).toBe(`${WORK_HEADING}\n- [ ] 1:1`);
 	});
 
 	it("lists participants by display name (falling back to email) once there are 3+", () => {
@@ -152,7 +155,7 @@ describe("renderCalendarBlock", () => {
 		];
 		const block = renderCalendarBlock(calendars, new Map([["work", events]]));
 		expect(block).toBe(
-			"**Work**\n- [ ] Sync[^1]\n\n[^1]: Participants: Alice, Bob, carol@example.com"
+			`${WORK_HEADING}\n- [ ] Sync[^obcaldian-1]\n\n[^obcaldian-1]: Participants: Alice, Bob, carol@example.com`
 		);
 	});
 
@@ -179,13 +182,13 @@ describe("renderCalendarBlock", () => {
 		const block = renderCalendarBlock(calendars, new Map([["work", events]]));
 		expect(block).toBe(
 			[
-				"**Work**",
-				"- [ ] Kickoff[^1]",
-				"- [ ] Retro[^2]",
+				WORK_HEADING,
+				"- [ ] Kickoff[^obcaldian-1]",
+				"- [ ] Retro[^obcaldian-2]",
 				"",
-				"[^1]: Project kickoff.",
+				"[^obcaldian-1]: Project kickoff.",
 				"    Participants: a@example.com, b@example.com, c@example.com",
-				"[^2]: Sprint retro.",
+				"[^obcaldian-2]: Sprint retro.",
 			].join("\n")
 		);
 	});
@@ -206,8 +209,71 @@ describe("renderCalendarBlock", () => {
 			new Set([key])
 		);
 		expect(block).toBe(
-			`**Work**\n- [x] Conference (Day 2/3) ${multiDayEventMarker(key)}`
+			`${WORK_HEADING}\n- [x] Conference (Day 2/3) ${multiDayEventMarker(key)}`
 		);
+	});
+
+	it("preserves checkbox state and attached annotations for a single-day event", () => {
+		const event: GoogleEvent = {
+			id: "standup-1",
+			summary: "Standup",
+			start: { dateTime: "2026-07-22T09:00:00Z" },
+			end: { dateTime: "2026-07-22T09:30:00Z" },
+		};
+		const key = multiDayEventKey("work", event.id!);
+		const previous = [
+			"<!-- obcaldian:calendar:start -->",
+			`- [x] 09:00 Standup ${multiDayEventMarker(key)} follow up with Alice`,
+			"  - user-authored detail",
+			"<!-- obcaldian:calendar:end -->",
+		].join("\n");
+		const block = renderCalendarBlock(
+			calendars,
+			new Map([["work", [event]]]),
+			"UTC",
+			"2026-07-22",
+			new Set(),
+			DEFAULT_SETTINGS.rendering,
+			extractPreservedEvents(previous)
+		);
+		expect(block).toContain(`- [x] 09:00-09:30 Standup ${multiDayEventMarker(key)} follow up with Alice`);
+		expect(block).toContain("  - user-authored detail");
+	});
+
+	it("escapes event Markdown and rejects non-Google event links", () => {
+		const event: GoogleEvent = {
+			id: "unsafe-1",
+			summary: "[Injected](javascript:alert(1)) <!-- obcaldian:calendar:end -->",
+			htmlLink: "javascript:alert(1)",
+			start: {},
+			end: {},
+		};
+		const block = renderCalendarBlock(calendars, new Map([["work", [event]]]));
+		expect(block).not.toContain("](javascript:");
+		expect(block).not.toContain("<!-- obcaldian:calendar:end -->");
+		expect(block).toContain(multiDayEventMarker(multiDayEventKey("work", event.id!)));
+	});
+
+	it("redacts private event details when configured", () => {
+		const event: GoogleEvent = {
+			id: "private-1",
+			summary: "Medical appointment",
+			description: "Sensitive details",
+			visibility: "private",
+			start: {},
+			end: {},
+		};
+		const block = renderCalendarBlock(
+			calendars,
+			new Map([["work", [event]]]),
+			"UTC",
+			undefined,
+			new Set(),
+			{ ...DEFAULT_SETTINGS.rendering, redactPrivateEvents: true }
+		);
+		expect(block).toContain("Busy");
+		expect(block).not.toContain("Medical appointment");
+		expect(block).not.toContain("Sensitive details");
 	});
 });
 

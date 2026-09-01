@@ -35,3 +35,23 @@ jobs:
             manifest.json
             styles.css
           if-no-files-found: error
+
+  api-compatibility:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        obsidian-version: [1.11.4, latest]
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+
+      - run: npm ci
+      - name: Compile against Obsidian API ${{ matrix.obsidian-version }}
+        run: |
+          npm install --no-save --ignore-scripts obsidian@${{ matrix.obsidian-version }}
+          npm run build

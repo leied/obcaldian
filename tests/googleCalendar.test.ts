@@ -2,7 +2,12 @@ import { requestUrl, SecretStorage } from "obsidian";
 import moment from "moment";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import type { AuthDeps } from "../src/googleAuth";
-import { listCalendars, listEventsForDay } from "../src/googleCalendar";
+import {
+	cachedEventsForDay,
+	listCalendars,
+	listEventsForDay,
+	refreshCalendarCache,
+} from "../src/googleCalendar";
 import { DEFAULT_SETTINGS } from "../src/settings";
 
 vi.mock("../src/googleAuth", () => ({
@@ -16,7 +21,13 @@ vi.mock("obsidian", async (importOriginal) => ({
 
 function deps(): AuthDeps {
 	return {
-		settings: { ...DEFAULT_SETTINGS, timezone: "UTC" },
+		settings: {
+			...DEFAULT_SETTINGS,
+			timezone: "UTC",
+			calendarCaches: {},
+			calendarHealth: {},
+			rendering: { ...DEFAULT_SETTINGS.rendering },
+		},
 		saveSettings: async () => {},
 		secretStorage: new SecretStorage(),
 	};
@@ -24,6 +35,91 @@ function deps(): AuthDeps {
 
 beforeEach(() => {
 	vi.mocked(requestUrl).mockReset();
+});
+
+describe("incremental calendar cache", () => {
+	it("stores a full-sync token and then requests only changes", async () => {
+		const auth = deps();
+		vi.mocked(requestUrl)
+			.mockResolvedValueOnce({
+				status: 200,
+				headers: {},
+				json: {
+					items: [
+						{
+							id: "event-1",
+							summary: "Original",
+							start: { date: "2026-07-22" },
+							end: { date: "2026-07-23" },
+						},
+					],
+					nextSyncToken: "token-1",
+				},
+			} as never)
+			.mockResolvedValueOnce({
+				status: 200,
+				headers: {},
+				json: {
+					items: [
+						{
+							id: "event-1",
+							summary: "Updated",
+							start: { date: "2026-07-22" },
+							end: { date: "2026-07-23" },
+						},
+					],
+					nextSyncToken: "token-2",
+				},
+			} as never);
+
+		await refreshCalendarCache(auth, "work", new Date("2026-07-01T00:00:00Z"));
+		const events = await refreshCalendarCache(auth, "work", new Date("2026-07-10T00:00:00Z"));
+
+		expect(events[0].summary).toBe("Updated");
+		expect(auth.settings.calendarCaches.work.syncToken).toBe("token-2");
+		expect(vi.mocked(requestUrl).mock.calls[1][0].url).toContain("syncToken=token-1");
+	});
+
+	it("rebuilds after Google invalidates a sync token", async () => {
+		const auth = deps();
+		auth.settings.calendarCaches.work = {
+			syncToken: "expired",
+			coverageStart: "2026-07-01T00:00:00.000Z",
+			updatedAt: Date.now(),
+			events: {},
+		};
+		vi.mocked(requestUrl)
+			.mockResolvedValueOnce({ status: 410, headers: {}, json: {} } as never)
+			.mockResolvedValueOnce({
+				status: 200,
+				headers: {},
+				json: { items: [], nextSyncToken: "replacement" },
+			} as never);
+
+		await refreshCalendarCache(auth, "work", new Date("2026-07-10T00:00:00Z"));
+		expect(auth.settings.calendarCaches.work.syncToken).toBe("replacement");
+		expect(vi.mocked(requestUrl).mock.calls[1][0].url).toContain("timeMin=");
+	});
+
+	it("filters cached all-day and timed events by overlap", () => {
+		const events = [
+			{
+				id: "all-day",
+				summary: "Trip",
+				start: { date: "2026-07-21" },
+				end: { date: "2026-07-24" },
+			},
+			{
+				id: "later",
+				summary: "Later",
+				start: { dateTime: "2026-07-23T09:00:00Z" },
+				end: { dateTime: "2026-07-23T10:00:00Z" },
+			},
+		];
+		expect(
+			cachedEventsForDay(events, moment("2026-07-22"), "UTC").map((event) => event.id)
+		).toEqual(["all-day"]);
+	});
 });
 
 describe("Google Calendar pagination", () => {

@@ -31,6 +31,16 @@ function localDateForInstant(dateTime: string, timeZone: string): string {
 	return `${parts.year}-${parts.month}-${parts.day}`;
 }
 
+export function eventStartDate(event: GoogleEvent, timeZone: string): string | null {
+	if (event.start.date) return event.start.date;
+	if (event.start.dateTime) return localDateForInstant(event.start.dateTime, timeZone);
+	if (event.originalStartTime?.date) return event.originalStartTime.date;
+	if (event.originalStartTime?.dateTime) {
+		return localDateForInstant(event.originalStartTime.dateTime, timeZone);
+	}
+	return null;
+}
+
 /** Returns an inclusive span only when the event overlaps more than one local calendar day. */
 export function multiDaySpan(ev: GoogleEvent, timeZone: string): MultiDaySpan | null {
 	let startDate: string | undefined;
@@ -68,10 +78,35 @@ export function multiDayEventKey(calendarId: string, eventId: string): string {
 	return `${calendarId}::${eventId}`;
 }
 
+/**
+ * Canonical identity for one occurrence. Recurring instances use their series ID plus Google's
+ * immutable original start, so moved and detached instances continue to match their old notes.
+ */
+export function eventOccurrenceKey(calendarId: string, event: GoogleEvent): string | null {
+	const eventId = event.recurringEventId || event.id;
+	if (!eventId) return null;
+	const originalStart = event.originalStartTime?.dateTime || event.originalStartTime?.date;
+	return event.recurringEventId && originalStart
+		? `${calendarId}::${eventId}::${originalStart}`
+		: multiDayEventKey(calendarId, eventId);
+}
+
 export function multiDayEventMarker(eventKey: string): string {
 	// Escape hyphens too, keeping the HTML comment body valid even for IDs containing "--".
 	const encoded = encodeURIComponent(eventKey).replace(/-/g, "%2D");
 	return `<!-- obcaldian:event:${encoded} -->`;
+}
+
+export const eventMarker = multiDayEventMarker;
+
+export function eventKeyFromMarkerLine(line: string): string | null {
+	const match = line.match(/<!-- obcaldian:event:([^\s]+) -->/);
+	if (!match) return null;
+	try {
+		return decodeURIComponent(match[1]);
+	} catch {
+		return null;
+	}
 }
 
 /** Reads a checkbox state only from the event's own invisible marker line. */

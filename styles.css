@@ -26,3 +26,63 @@
 .obcaldian-setting-error {
 	color: var(--text-error);
 }
+
+.obcaldian-file-input {
+	display: none;
+}
+
+.obcaldian-calendar-label {
+	display: inline-block;
+	width: 0.65em;
+	height: 0.65em;
+	margin-inline-end: 0.25em;
+	border: 1px solid var(--background-modifier-border-hover);
+	border-radius: 50%;
+	background: var(--interactive-accent);
+}
+
+.obcaldian-calendar-color-1,
+.obcaldian-calendar-color-8,
+.obcaldian-calendar-color-15,
+.obcaldian-calendar-color-22 { background: #7986cb; }
+.obcaldian-calendar-color-2,
+.obcaldian-calendar-color-9,
+.obcaldian-calendar-color-16,
+.obcaldian-calendar-color-23 { background: #33b679; }
+.obcaldian-calendar-color-3,
+.obcaldian-calendar-color-10,
+.obcaldian-calendar-color-17,
+.obcaldian-calendar-color-24 { background: #8e24aa; }
+.obcaldian-calendar-color-4,
+.obcaldian-calendar-color-11,
+.obcaldian-calendar-color-18 { background: #e67c73; }
+.obcaldian-calendar-color-5,
+.obcaldian-calendar-color-12,
+.obcaldian-calendar-color-19 { background: #f6bf26; }
+.obcaldian-calendar-color-6,
+.obcaldian-calendar-color-13,
+.obcaldian-calendar-color-20 { background: #f4511e; }
+.obcaldian-calendar-color-7,
+.obcaldian-calendar-color-14,
+.obcaldian-calendar-color-21 { background: #039be5; }
+
+.obcaldian-sync-preview {
+	max-height: 50vh;
+	overflow: auto;
+	border: 1px solid var(--background-modifier-border);
+	border-radius: var(--radius-s);
+}
+
+.obcaldian-sync-preview-item {
+	padding: 0.75em;
+	border-bottom: 1px solid var(--background-modifier-border);
+}
+
+.obcaldian-sync-preview-item:last-child {
+	border-bottom: 0;
+}
+
+.obcaldian-sync-preview-item pre {
+	white-space: pre-wrap;
+	color: var(--text-muted);
+}

@@ -152,6 +152,13 @@ Repeat the process for each Google account. Every profile owns its credentials, 
 cache, and health state. Removing a profile revokes its refresh token when possible and clears that
 profile's local secrets without affecting any other profile.
 
+#### 4f. Generate test events (optional)
+
+If you'd like a calendar with known content to sync against rather than your real events, run
+`node scripts/generate-test-ical.mjs` from this repo (see [Development](#development)) to produce
+an `.ics` file, then import it into a dedicated secondary calendar under the connected account
+(Google Calendar → Settings → Import & export → Import) before enabling that calendar in step 4e.
+
 ### 5. Add a Secret iCalendar feed
 
 Under **Secret iCalendar feeds**, click **Add iCal feed**, name it, and paste its private HTTPS
@@ -253,6 +260,12 @@ Cache contents stay local in Obsidian's plugin data and can include event metada
 - `npm test` — runs the test suite.
 - `npm run validate:release` — validates publication files and version metadata after a build.
 - `npm run check` — runs the production build, tests, and release validation used by CI.
+- `node scripts/generate-test-ical.mjs [--out=test-calendar.ics] [--start=YYYY-MM-DD]` — writes an
+  `.ics` file of test events (footnote thresholds, multi-day spans, filtered/private/cancelled
+  events, escaping edge cases, and recurrence with a skipped and a moved occurrence) for manually
+  exercising sync against a real Google account, as in [step 4f](#4f-generate-test-events-optional).
+  Its output is also round-tripped through the plugin's own iCalendar parser in
+  `tests/generate-test-ical.test.ts`, which runs as part of `npm test`/CI.
 
 CI tests Node.js 20 and 22, compiles against Obsidian 1.11.4 and the latest API, and uploads an
 installable plugin artifact. Tag builds additionally

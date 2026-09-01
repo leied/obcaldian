@@ -31,14 +31,34 @@
 	display: none;
 }
 
+.dailycalsync-calendar-heading {
+	display: inline-flex;
+	align-items: center;
+	gap: 0.45em;
+	font-size: var(--font-smaller);
+	letter-spacing: 0.06em;
+	text-transform: uppercase;
+	color: var(--text-muted);
+}
+
+.dailycalsync-calendar-heading strong {
+	font-weight: var(--font-semibold);
+	color: inherit;
+}
+
 .dailycalsync-calendar-label {
 	display: inline-block;
+	flex: none;
 	width: 0.65em;
 	height: 0.65em;
 	margin-inline-end: 0.25em;
 	border: 1px solid var(--background-modifier-border-hover);
 	border-radius: 50%;
 	background: var(--interactive-accent);
+}
+
+.dailycalsync-calendar-heading .dailycalsync-calendar-label {
+	margin-inline-end: 0;
 }
 
 .dailycalsync-calendar-color-1,

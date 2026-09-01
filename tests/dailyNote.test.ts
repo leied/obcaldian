@@ -16,7 +16,7 @@ import { FakeVault } from "./fakeVault";
 
 const DATE = moment("2026-07-22");
 const WORK_HEADING =
-	'<span class="dailycalsync-calendar-label dailycalsync-calendar-pexppc"></span> **Work**';
+	'<span class="dailycalsync-calendar-heading"><span class="dailycalsync-calendar-label dailycalsync-calendar-pexppc"></span>**Work**</span>';
 
 describe("fileNameFor / notePathFor", () => {
 	it("names the file YYYYMMDD.md", () => {
@@ -156,7 +156,7 @@ describe("renderCalendarBlock", () => {
 		];
 		const block = renderCalendarBlock(calendars, new Map([["work", events]]));
 		expect(block).toBe(
-			`${WORK_HEADING}\n- [ ] Sync[^dailycalsync-1]\n\n[^dailycalsync-1]: Participants: Alice, Bob, carol@example.com`
+			`${WORK_HEADING}\n- [ ] Sync[^dailycalsync-1]\n\n[^dailycalsync-1]: **Participants:** Alice, Bob, carol@example.com`
 		);
 	});
 
@@ -188,8 +188,84 @@ describe("renderCalendarBlock", () => {
 				"- [ ] Retro[^dailycalsync-2]",
 				"",
 				"[^dailycalsync-1]: Project kickoff.",
-				"    Participants: a@example.com, b@example.com, c@example.com",
+				"    **Participants:** a@example.com, b@example.com, c@example.com",
 				"[^dailycalsync-2]: Sprint retro.",
+			].join("\n")
+		);
+	});
+
+	it("separates calendars with a blank line so the next heading is not folded into the list", () => {
+		const both = [
+			{ id: "work", summary: "Work", enabled: true, addAs: "checkbox" as const },
+			{ id: "personal", summary: "Personal", enabled: true, addAs: "bullet" as const },
+		];
+		const block = renderCalendarBlock(
+			both,
+			new Map([
+				["work", [{ summary: "Standup", start: {}, end: {} }] as GoogleEvent[]],
+				["personal", [{ summary: "Yoga", start: {}, end: {} }] as GoogleEvent[]],
+			])
+		);
+		expect(block).toBe(
+			[
+				WORK_HEADING,
+				"- [ ] Standup",
+				"",
+				'<span class="dailycalsync-calendar-heading"><span class="dailycalsync-calendar-label dailycalsync-calendar-3e4eq5"></span>**Personal**</span>',
+				"- Yoga",
+			].join("\n")
+		);
+	});
+
+	it("turns HTML in a description into line breaks and decoded text", () => {
+		const events: GoogleEvent[] = [
+			{
+				summary: "Quarter break",
+				description:
+					"Ongoing event<br>Year: 2026<br /><p>Break between summer &amp; autumn quarters.</p>",
+				start: {},
+				end: {},
+			},
+		];
+		const block = renderCalendarBlock(calendars, new Map([["work", events]]));
+		expect(block).toBe(
+			[
+				WORK_HEADING,
+				"- [ ] Quarter break[^dailycalsync-1]",
+				"",
+				"[^dailycalsync-1]: Ongoing event",
+				"    Year: 2026",
+				"    Break between summer & autumn quarters.",
+			].join("\n")
+		);
+	});
+
+	it("omits the description entirely when it is nothing but markup", () => {
+		const events: GoogleEvent[] = [
+			{ summary: "Empty", description: "<div><br></div>", start: {}, end: {} },
+		];
+		const block = renderCalendarBlock(calendars, new Map([["work", events]]));
+		expect(block).toBe(`${WORK_HEADING}\n- [ ] Empty`);
+	});
+
+	it("labels location and meeting lines in the footnote", () => {
+		const events: GoogleEvent[] = [
+			{
+				summary: "Review",
+				location: "Room&nbsp;4",
+				hangoutLink: "https://meet.google.com/abc-defg-hij",
+				start: {},
+				end: {},
+			},
+		];
+		const block = renderCalendarBlock(calendars, new Map([["work", events]]));
+		expect(block).toBe(
+			[
+				WORK_HEADING,
+				"- [ ] Review[^dailycalsync-1]",
+				"",
+				"[^dailycalsync-1]: **Location:** Room 4",
+				"    **Meeting:** https://meet.google.com/abc-defg-hij",
 			].join("\n")
 		);
 	});

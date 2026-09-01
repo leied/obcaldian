@@ -33,6 +33,17 @@ builds, tests, validates, attests the artifacts, and creates a draft GitHub Rele
 To manually exercise the plugin, symlink or copy this repo (built) into an Obsidian vault's
 `.obsidian/plugins/dailycalsync/` folder and enable it in Obsidian's Community Plugins settings.
 
+To exercise the Google-account sync path specifically, `node scripts/generate-test-ical.mjs
+[--out=test-calendar.ics] [--start=YYYY-MM-DD]` writes an `.ics` file covering the rendering/sync
+edge cases worth checking by hand — footnote thresholds, multi-day spans, the exact-midnight
+boundary, filtered (private/free/cancelled) events, markdown/marker-lookalike escaping, and
+recurrence including an `EXDATE` skip and a `RECURRENCE-ID` moved instance. Import it into a
+Google Calendar (Settings → Import & export → Import), preferably into a dedicated secondary
+calendar, then enable that calendar in the plugin and sync. It has no live-account dependency
+itself — `buildTestCalendar` is exported and fed back through `parseICalendar` in
+`tests/generate-test-ical.test.ts` as a CI smoke test, since the generator can't be run against a
+real Google account in CI.
+
 ### Tests
 
 `tests/` is excluded from `tsconfig.json`'s project (`npm run build`'s `tsc -noEmit` never
@@ -45,7 +56,9 @@ don't depend on the machine's local timezone. `tests/fakeVault.ts` is an in-memo
 by `dailyNote.test.ts`. OAuth network calls aren't unit tested; Google Calendar pagination is tested
 with mocked `requestUrl` responses, and the remaining coverage focuses on pure logic
 (`timezone.ts`, `dailyNote.ts`'s rendering/marker logic, `googleAuth.ts`'s secret-storage helpers and
-migration).
+migration). `generate-test-ical.test.ts` imports `buildTestCalendar` from
+`scripts/generate-test-ical.mjs` and round-trips its output through `parseICalendar`/`multiDaySpan`
+as a smoke test for that manual-testing script.
 
 ## Architecture
 
@@ -119,9 +132,15 @@ Module responsibilities in `src/`, in dependency order:
     description and/or 3+ attendees
     get a `[^n]` marker with a markdown footnote definition appended at the end of the *same*
     rendered block (footnotes must live inside the marker-delimited section, since sync never
-    touches anything outside it) — description first, then a `Participants:` line only once
+    touches anything outside it) — description first, then a `**Participants:**` line only once
     attendees reach `MIN_ATTENDEES_TO_LIST` (3). Footnote numbering is a single counter threaded
-    across all calendars in one render call.
+    across all calendars in one render call. Descriptions and locations run through
+    `htmlToPlainText` first: Google's descriptions are HTML and iCalendar feeds smuggle tags into
+    plain-text ones, so `<br>`-style markup becomes real line breaks instead of escaped literals.
+  - Each calendar gets a `dailycalsync-calendar-heading` span (colored dot plus name, styled small
+    and muted by `styles.css`), and consecutive calendars are separated by a blank line — without
+    it Markdown folds the next heading and its events into the previous calendar's list as a lazy
+    continuation, which breaks indentation in Live Preview.
   - Every identified event has an invisible marker. Rendering parses and reattaches checkbox state,
     same-line annotation text, and indented annotation lines; deleted/filtered annotations remain
     visible as unmatched rather than being discarded.

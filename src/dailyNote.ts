@@ -199,6 +199,50 @@ function safeMultilineText(value: string): string {
 		.join(`\n${FOOTNOTE_CONTINUATION_INDENT}`);
 }
 
+const HTML_NAMED_ENTITIES: Record<string, string> = {
+	amp: "&",
+	lt: "<",
+	gt: ">",
+	quot: "\"",
+	apos: "'",
+	nbsp: " ",
+};
+
+function decodeHtmlEntities(value: string): string {
+	return value.replace(
+		/&(#\d+|#[xX][0-9a-fA-F]+|[a-zA-Z][a-zA-Z0-9]*);/g,
+		(match, reference: string) => {
+			if (!reference.startsWith("#")) {
+				return HTML_NAMED_ENTITIES[reference.toLowerCase()] ?? match;
+			}
+			const hex = reference[1] === "x" || reference[1] === "X";
+			const codePoint = Number.parseInt(reference.slice(hex ? 2 : 1), hex ? 16 : 10);
+			if (!Number.isFinite(codePoint) || codePoint <= 0 || codePoint > 0x10_ff_ff) return match;
+			try {
+				return String.fromCodePoint(codePoint);
+			} catch {
+				return match;
+			}
+		}
+	);
+}
+
+/**
+ * Google's descriptions are HTML, and iCalendar feeds routinely smuggle tags
+ * into nominally plain-text ones, so both arrive littered with `<br>` that
+ * Markdown escaping would otherwise render literally. Block-ish tags become
+ * line breaks, the rest are dropped, and entities decode last so a decoded "<"
+ * is never mistaken for the start of a tag.
+ */
+function htmlToPlainText(value: string): string {
+	const withBreaks = value
+		.replace(/<\s*br\s*\/?\s*>/gi, "\n")
+		.replace(/<\s*li\b[^>]*>/gi, "\n")
+		.replace(/<\s*\/\s*(?:p|div|li|tr|h[1-6]|blockquote|ul|ol)\s*>/gi, "\n")
+		.replace(/<\s*\/?\s*[a-zA-Z][^>]*>/g, "");
+	return decodeHtmlEntities(withBreaks);
+}
+
 function safeGoogleEventUrl(rawUrl: string | undefined): string | null {
 	if (!rawUrl) return null;
 	try {
@@ -265,12 +309,17 @@ export function eventIsIncluded(event: GoogleEvent, rendering: RenderingSettings
 function footnoteBody(ev: GoogleEvent, rendering: RenderingSettings): string | null {
 	const parts: string[] = [];
 	const description = ev.description?.trim();
-	if (description && rendering.showDescriptions) parts.push(safeMultilineText(description));
-	if (ev.location?.trim() && rendering.showLocations) {
-		parts.push(`Location: ${safeInlineText(ev.location)}`);
+	if (description && rendering.showDescriptions) {
+		const text = safeMultilineText(htmlToPlainText(description));
+		if (text) parts.push(text);
+	}
+	const location = ev.location?.trim();
+	if (location && rendering.showLocations) {
+		const text = safeInlineText(htmlToPlainText(location));
+		if (text) parts.push(`**Location:** ${text}`);
 	}
 	const meetingUrl = rendering.showMeetingLinks ? safeMeetingUrl(ev.hangoutLink) : null;
-	if (meetingUrl) parts.push(`Meeting: ${meetingUrl}`);
+	if (meetingUrl) parts.push(`**Meeting:** ${meetingUrl}`);
 
 	const attendees = ev.attendees ?? [];
 	if (rendering.showAttendees && attendees.length >= MIN_ATTENDEES_TO_LIST) {
@@ -281,7 +330,7 @@ function footnoteBody(ev: GoogleEvent, rendering: RenderingSettings): string | n
 				return rendering.includeAttendeeEmails ? safeInlineText(attendee.email) : "Attendee";
 			})
 			.join(", ");
-		parts.push(`Participants: ${names}`);
+		parts.push(`**Participants:** ${names}`);
 	}
 
 	if (parts.length === 0) return null;
@@ -353,11 +402,16 @@ export function renderCalendarBlock(
 				);
 			});
 		if (events.length === 0) continue;
-		const classes = ["dailycalsync-calendar-label", calendarClass(cal.id)];
+		const dotClasses = ["dailycalsync-calendar-label", calendarClass(cal.id)];
 		if (rendering.useGoogleCalendarColors && cal.colorId && /^\d{1,2}$/.test(cal.colorId)) {
-			classes.push(`dailycalsync-calendar-color-${cal.colorId}`);
+			dotClasses.push(`dailycalsync-calendar-color-${cal.colorId}`);
 		}
-		lines.push(`<span class="${classes.join(" ")}"></span> **${safeInlineText(cal.summary)}**`);
+		// A blank line ends the previous calendar's list; without it Markdown folds
+		// this heading (and everything under it) into that list as a continuation.
+		if (lines.length > 0) lines.push("");
+		lines.push(
+			`<span class="dailycalsync-calendar-heading"><span class="${dotClasses.join(" ")}"></span>**${safeInlineText(cal.summary)}**</span>`
+		);
 		for (const ev of events) {
 			const span = multiDaySpan(ev, timeZone);
 			const eventKey = eventOccurrenceKey(cal.id, ev);

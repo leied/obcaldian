@@ -16,6 +16,7 @@ import {
 	syncDateRange,
 	syncRange,
 	undoSyncSnapshot,
+	type MultiDayDecision,
 	type SyncUndoSnapshot,
 } from "../src/sync";
 import { FakeVault } from "./fakeVault";
@@ -94,8 +95,8 @@ describe("syncRange notifications", () => {
 
 		expect(vi.mocked(refreshCalendarCache).mock.calls.map(([auth]) => auth.accountId)).toEqual([ACCOUNT_ID, "account-two"]);
 		const content = vault.contentOf(`${moment().format("YYYYMMDD")}.md`);
-		expect(content).toContain("**Work**");
-		expect(content).toContain("**Personal**");
+		expect(content).toContain(">Work</span>");
+		expect(content).toContain(">Personal</span>");
 	});
 
 	it("syncs an iCalendar feed without requiring Google OAuth", async () => {
@@ -109,7 +110,7 @@ describe("syncRange notifications", () => {
 
 		await syncRange(vault as never, deps, 0, { notify: false });
 
-		expect(vault.contentOf(`${moment().format("YYYYMMDD")}.md`)).toContain("**Shared**");
+		expect(vault.contentOf(`${moment().format("YYYYMMDD")}.md`)).toContain(">Shared</span>");
 		expect(vault.contentOf(`${moment().format("YYYYMMDD")}.md`)).toContain("- Read only");
 	});
 
@@ -378,6 +379,91 @@ describe("multi-day completion behavior", () => {
 		return vault;
 	}
 
+	/** Seeds the day at `offset` in the span as already checked, and the rest as synced-but-not. */
+	async function vaultWithCheckedDay(event: GoogleEvent, offset: number): Promise<FakeVault> {
+		const vault = new FakeVault();
+		await vault.create("Templates/Daily.md", "{{date}}\n{calendar}\n");
+		const key = multiDayEventKey(SOURCE_ID, event.id!);
+		for (let day = 0; day < 3; day += 1) {
+			await vault.create(
+				`${moment().add(day, "days").format("YYYYMMDD")}.md`,
+				[
+					"<!-- dailycalsync:calendar:start -->",
+					`- [${day === offset ? "x" : " "}] Conference ${multiDayEventMarker(key)}`,
+					"<!-- dailycalsync:calendar:end -->",
+				].join("\n")
+			);
+		}
+		return vault;
+	}
+
+	const contentOn = (vault: FakeVault, offset: number): string =>
+		vault.contentOf(`${moment().add(offset, "days").format("YYYYMMDD")}.md`);
+
+	it("marks every day of the span done, including days before the one checked", async () => {
+		const event = spanningEvent();
+		const vault = await vaultWithCheckedDay(event, 1);
+		const deps = connectedDeps();
+		deps.settings.multiDayCompletionBehavior = "all";
+		vi.mocked(refreshCalendarCache).mockResolvedValue([event]);
+
+		await syncRange(vault as never, deps, 2, { notify: false });
+
+		expect(contentOn(vault, 0)).toContain("- [x] Conference (Day 1/3)");
+		expect(contentOn(vault, 1)).toContain("- [x] Conference (Day 2/3)");
+		expect(contentOn(vault, 2)).toContain("- [x] Conference (Day 3/3)");
+		expect(deps.settings.multiDayCompletionRules[multiDayEventKey(SOURCE_ID, event.id!)]).toEqual({
+			completedFrom: moment().format("YYYY-MM-DD"),
+			eventEnd: moment().add(2, "days").format("YYYY-MM-DD"),
+		});
+	});
+
+	it("clears the whole span and retires the rule when a propagated day is unchecked", async () => {
+		const event = spanningEvent();
+		const vault = await vaultWithCheckedDay(event, 0);
+		const deps = connectedDeps();
+		deps.settings.multiDayCompletionBehavior = "all";
+		vi.mocked(refreshCalendarCache).mockResolvedValue([event]);
+
+		await syncRange(vault as never, deps, 2, { notify: false });
+		expect(contentOn(vault, 2)).toContain("- [x] Conference (Day 3/3)");
+
+		// The user unticks the middle day.
+		const path = `${moment().add(1, "day").format("YYYYMMDD")}.md`;
+		await vault.modify(
+			vault.getAbstractFileByPath(path) as never,
+			contentOn(vault, 1).replace("- [x] Conference", "- [ ] Conference")
+		);
+
+		await syncRange(vault as never, deps, 2, { notify: false });
+
+		expect(deps.settings.multiDayCompletionRules).toEqual({});
+		expect(contentOn(vault, 0)).toContain("- [ ] Conference (Day 1/3)");
+		expect(contentOn(vault, 1)).toContain("- [ ] Conference (Day 2/3)");
+		expect(contentOn(vault, 2)).toContain("- [ ] Conference (Day 3/3)");
+	});
+
+	it("offers marking the whole event from the ask prompt", async () => {
+		const event = spanningEvent();
+		const vault = await vaultWithCheckedDay(event, 2);
+		const deps = connectedDeps();
+		deps.settings.multiDayCompletionBehavior = "ask";
+		vi.mocked(refreshCalendarCache).mockResolvedValue([event]);
+		const confirmMultiDay = vi.fn(async (): Promise<MultiDayDecision> => "whole");
+
+		await syncRange(vault as never, deps, 2, { confirmMultiDay });
+
+		expect(confirmMultiDay).toHaveBeenCalledWith(
+			expect.objectContaining({
+				eventStart: moment().format("YYYY-MM-DD"),
+				eventEnd: moment().add(2, "days").format("YYYY-MM-DD"),
+				completedFrom: moment().add(2, "days").format("YYYY-MM-DD"),
+			})
+		);
+		expect(contentOn(vault, 0)).toContain("- [x] Conference (Day 1/3)");
+		expect(contentOn(vault, 1)).toContain("- [x] Conference (Day 2/3)");
+	});
+
 	it("persists automatic following-day completion for a note synced later", async () => {
 		const event = spanningEvent();
 		const vault = await vaultWithCheckedFirstDay(event);
@@ -411,7 +497,7 @@ describe("multi-day completion behavior", () => {
 		const deps = connectedDeps();
 		deps.settings.multiDayCompletionBehavior = "ask";
 		vi.mocked(refreshCalendarCache).mockResolvedValue([event]);
-		const confirmMultiDay = vi.fn(async () => false);
+		const confirmMultiDay = vi.fn(async (): Promise<MultiDayDecision> => "separate");
 
 		await syncRange(vault as never, deps, 1, { confirmMultiDay });
 
@@ -437,7 +523,7 @@ describe("multi-day completion behavior", () => {
 		deps.settings.multiDayCompletionBehavior = "ask";
 		deps.saveSettings = vi.fn(async () => {});
 		vi.mocked(refreshCalendarCache).mockResolvedValue([event]);
-		const confirmMultiDay = vi.fn(async () => true);
+		const confirmMultiDay = vi.fn(async (): Promise<MultiDayDecision> => "following");
 
 		await syncRange(vault as never, deps, 0, { confirmMultiDay });
 
@@ -459,7 +545,7 @@ describe("multi-day completion behavior", () => {
 		deps.settings.multiDayCompletionBehavior = "ask";
 		deps.settings.syncDaysAhead = 1;
 		vi.mocked(refreshCalendarCache).mockResolvedValue([event]);
-		const confirmMultiDay = vi.fn(async () => true);
+		const confirmMultiDay = vi.fn(async (): Promise<MultiDayDecision> => "following");
 
 		await autoSyncTick(vault as never, deps, { confirmMultiDay });
 

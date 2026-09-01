@@ -73,7 +73,8 @@ Module responsibilities in `src/`, in dependency order:
   plugin `data.json` in plain text. Only the non-secret `tokenExpiresAt` timestamp stays here.
   New installations default to an infrequent three-hour automatic calendar check; persisted users'
   existing interval choice is preserved, and `0` still disables it.
-  `multiDayCompletionBehavior` selects independent/ask/automatic-following behavior, while
+  `multiDayCompletionBehavior` selects independent/ask/automatic-following/every-day behavior
+  (`all` marks the entire span from one tick, including days *before* the one checked), while
   `multiDayCompletionRules` persists non-secret `{completedFrom,eventEnd}` decisions so
   occurrences in notes synced later receive the chosen state.
 - **`googleAuth.ts`** — the Google OAuth "installed app" loopback flow with desktop-credentials JSON
@@ -111,6 +112,15 @@ Module responsibilities in `src/`, in dependency order:
   `GoogleEvent` includes `description`, `attendees`, and `htmlLink` (used for footnotes and the
   event link), plus Google's stable event-instance `id` for multi-day identity — all returned by
   the API by default, no extra `fields` param needed.
+  Cached events are projected down to `CACHED_EVENT_FIELDS`/`CACHED_ATTENDEE_FIELDS` on write:
+  Google's payload also carries `conferenceData`, `reminders`, `organizer` and more that nothing
+  renders, and this cache sits in plaintext `data.json`. Incremental sync only ever merges events
+  *in*, so `pruneCalendarCache` runs after each incremental refresh and drops anything that ended
+  more than `CACHE_RETENTION_DAYS` (30) ago — including deletion tombstones — while advancing
+  `coverageStart` to the same cutoff, so a later request for pruned days rebuilds from Google
+  rather than trusting a cache that no longer holds them. The cutoff never passes the caller's
+  `requiredStart`, so syncing an explicitly requested older range does not delete what it fetched.
+  iCal caches need none of this: `refreshICalCalendar` replaces each feed's cache wholesale.
 - **`multiDay.ts`** — pure date-span and canonical event-identity logic. Recurring keys combine
   calendar, series, and immutable original-start identity. All-day `end.date` is treated as
   exclusive; timed spans use the configured timezone and subtract 1ms from the end so an exact
@@ -140,18 +150,25 @@ Module responsibilities in `src/`, in dependency order:
     across all calendars in one render call. Descriptions and locations run through
     `htmlToPlainText` first: Google's descriptions are HTML and iCalendar feeds smuggle tags into
     plain-text ones, so `<br>`-style markup becomes real line breaks instead of escaped literals.
-  - Each calendar gets a `dailycalsync-calendar-heading` span (colored dot plus name, styled small
-    and muted by `styles.css`), and consecutive calendars are separated by a blank line — without
-    it Markdown folds the next heading and its events into the previous calendar's list as a lazy
-    continuation, which breaks indentation in Live Preview.
-  - Event identity lives in one `<!-- dailycalsync:index ... -->` comment at the very end of the
-    block, never on the event lines themselves — Obsidian reveals a comment as soon as the cursor
-    reaches its line, so a per-line marker sat in the reader's way. Each row is
-    `<encoded key> <generated length> <digest>`: the length marks where this plugin's text stops
-    and a user's inline annotation begins, and the FNV digest confirms the line is still that
-    event before its state is reused. Lines are matched longest-digest-first and each entry is
-    claimed once, so an event repeated across two calendars resolves in render order. Notes from
-    older versions are still read through their inline markers.
+  - Each calendar gets a `dailycalsync-calendar-heading` span (colored dot plus name, styled small,
+    semibold and muted by `styles.css`), and consecutive calendars are separated by a blank line —
+    without it Markdown folds the next heading and its events into the previous calendar's list as
+    a lazy continuation, which breaks indentation in Live Preview. The name inside that span goes
+    through `safeHtmlText`, not `safeInlineText`: Live Preview passes inline HTML through without
+    running Markdown on its contents, so `**bold**` and backslash escapes would both render
+    literally there.
+  - Event identity lives in one `<!-- dailycalsync:index ... -->` comment line at the very end of
+    the block, never on the event lines themselves — Obsidian reveals a comment as soon as the
+    cursor reaches its line, so a per-line marker sat in the reader's way. Each whitespace-separated
+    `key:length:digest` triple names an event by `eventStateKey` (a double-round FNV of the event
+    key: Google's own keys run ~200 characters encoded, and nothing ever needs to read a key back
+    *out* of a note, only to look one up), gives the length that marks where this plugin's text
+    stops and a user's inline annotation begins, and carries a digest confirming the line is still
+    that event before its state is reused. Lines are matched longest-digest-first and each entry is
+    claimed once, so an event repeated across two calendars resolves in render order.
+    `extractPreservedEvents` therefore keys its map by `eventStateKey`, and every `sync.ts` lookup
+    into a preserved map goes through it — TypeScript cannot tell the two `string`s apart, so this
+    is a convention to keep. Notes from older versions are still read through their inline markers.
   - Rendering parses and reattaches checkbox state, same-line annotation text, and indented
     annotation lines; deleted/filtered annotations remain visible as unmatched rather than being
     discarded. Editing an event's own generated text breaks its digest; when exactly as many lines
@@ -167,7 +184,12 @@ Module responsibilities in `src/`, in dependency order:
   per-calendar health, categorized failures, multi-profile Google and iCalendar sources, and
   stale-write protection all live here.
   `SyncOptions.confirmMultiDay` keeps Modal/UI concerns outside this module; it is only called for
-  interactive `ask` syncs. `SyncOptions.onStart`/`onSuccess`/`onError` fire regardless of `notify`
+  interactive `ask` syncs, and returns a `MultiDayDecision` (`separate`/`following`/`whole`) rather
+  than a boolean. `resolveCheckedEvents` reads each span day with `eventCheckStateInNote`, whose
+  third state (`null`, no line in that note) is what keeps an unsynced day from being read as one
+  the user cleared. Clearing a day the rule had marked done retires the rule and clears the whole
+  span through `CheckedResolution.clearedByDate` — without that, the next sync would just tick the
+  box again and completion could never be undone. `SyncOptions.onStart`/`onSuccess`/`onError` fire regardless of `notify`
   (used by `main.ts` to drive the status bar, independent of whether Notices are shown) — `onError`
   also fires for the "not connected"/"no calendars enabled" preconditions, with the same message
   text used to build the Notice. `syncAll` is `syncRange` using `settings.syncDaysAhead`, notifying;
@@ -179,8 +201,9 @@ Module responsibilities in `src/`, in dependency order:
 - **`syncDaysModal.ts`** — a small `Modal` prompting for a day count, pre-filled from
   `settings.syncDaysAhead`, used by the "Sync next N days..." command for one-off ranges without
   touching the persisted default.
-- **`multiDayCompletionModal.ts`** — resolves a Promise<boolean> from “Keep days separate” / “Mark
-  following done.” Closing it is equivalent to keeping days separate. Background sync never opens it.
+- **`multiDayCompletionModal.ts`** — resolves a `MultiDayDecision` from “Keep days separate” /
+  “Through <end>” / “Whole event (<start>–<end>).” Closing it is equivalent to keeping days
+  separate. Background sync never opens it.
 - **`settingsTab.ts`** — the Obsidian settings UI. Reads/writes `plugin.settings` directly and
   calls `plugin.saveSettings()` after each change; calendar list refresh reconciles freshly fetched
   calendars against existing ones by `id` so user toggles/`addAs` choices survive a refresh. The

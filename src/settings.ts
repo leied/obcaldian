@@ -2,7 +2,7 @@ export const SETTINGS_SCHEMA_VERSION = 6;
 export const LEGACY_GOOGLE_ACCOUNT_ID = "default-google";
 
 export type AddAsStyle = "checkbox" | "bullet";
-export type MultiDayCompletionBehavior = "independent" | "ask" | "following";
+export type MultiDayCompletionBehavior = "independent" | "ask" | "following" | "all";
 export type NoteCreationMode = "create-missing" | "existing-only";
 export type HourCycleSetting = "system" | "12" | "24";
 
@@ -416,7 +416,7 @@ export function loadSettingsData(rawInput: unknown): { settings: DailyCalSyncSet
 		timezone: stringValue(raw.timezone, DEFAULT_SETTINGS.timezone),
 		syncDaysAhead: nonNegativeInteger(raw.syncDaysAhead, DEFAULT_SETTINGS.syncDaysAhead),
 		autoSyncIntervalMinutes: nonNegativeInteger(raw.autoSyncIntervalMinutes, DEFAULT_SETTINGS.autoSyncIntervalMinutes),
-		multiDayCompletionBehavior: oneOf(raw.multiDayCompletionBehavior, ["independent", "ask", "following"] as const, "ask"),
+		multiDayCompletionBehavior: oneOf(raw.multiDayCompletionBehavior, ["independent", "ask", "following", "all"] as const, "ask"),
 		multiDayCompletionRules: normalizeRules(raw.multiDayCompletionRules),
 		rendering: normalizeRendering(raw.rendering),
 		lastSuccessfulSyncAt: optionalTimestamp(raw.lastSuccessfulSyncAt),

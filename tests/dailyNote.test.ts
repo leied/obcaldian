@@ -2,7 +2,8 @@ import moment from "moment";
 import { describe, expect, it } from "vitest";
 import {
 	ensureDailyNote,
-	eventIsCheckedInNote,
+	eventCheckStateInNote,
+	eventStateKey,
 	extractPreservedEvents,
 	fileNameFor,
 	notePathFor,
@@ -11,16 +12,18 @@ import {
 	templateFileFor,
 } from "../src/dailyNote";
 import type { GoogleEvent } from "../src/googleCalendar";
-import { encodeEventKey, multiDayEventKey, multiDayEventMarker } from "../src/multiDay";
+import { multiDayEventKey, multiDayEventMarker } from "../src/multiDay";
 import { DEFAULT_SETTINGS } from "../src/settings";
 import { FakeVault } from "./fakeVault";
 
 const DATE = moment("2026-07-22");
+const INDEX_OPEN = "<!-- dailycalsync:index";
+
 /** The rendered event lines, dropping the identity index appended after them. */
-const eventLines = (block: string): string => block.split("\n\n<!-- dailycalsync:index")[0];
+const eventLines = (block: string): string => block.split(`\n\n${INDEX_OPEN}`)[0];
 
 const WORK_HEADING =
-	'<span class="dailycalsync-calendar-heading"><span class="dailycalsync-calendar-label dailycalsync-calendar-pexppc"></span>**Work**</span>';
+	'<span class="dailycalsync-calendar-heading"><span class="dailycalsync-calendar-label dailycalsync-calendar-pexppc"></span>Work</span>';
 
 describe("fileNameFor / notePathFor", () => {
 	it("names the file YYYYMMDD.md", () => {
@@ -215,7 +218,7 @@ describe("renderCalendarBlock", () => {
 				WORK_HEADING,
 				"- [ ] Standup",
 				"",
-				'<span class="dailycalsync-calendar-heading"><span class="dailycalsync-calendar-label dailycalsync-calendar-3e4eq5"></span>**Personal**</span>',
+				'<span class="dailycalsync-calendar-heading"><span class="dailycalsync-calendar-label dailycalsync-calendar-3e4eq5"></span>Personal</span>',
 				"- Yoga",
 			].join("\n")
 		);
@@ -291,8 +294,8 @@ describe("renderCalendarBlock", () => {
 		);
 		expect(eventLines(block)).toBe(`${WORK_HEADING}\n- [x] Conference (Day 2/3)`);
 		expect(block).not.toContain("<!-- dailycalsync:event:");
-		expect(eventIsCheckedInNote(block, key)).toBe(true);
-		expect(eventIsCheckedInNote(block, multiDayEventKey("work", "other"))).toBe(false);
+		expect(eventCheckStateInNote(block, key)).toBe(true);
+		expect(eventCheckStateInNote(block, multiDayEventKey("work", "other"))).toBe(null);
 	});
 
 	it("indexes identity once at the end of the block instead of on each event line", () => {
@@ -302,8 +305,10 @@ describe("renderCalendarBlock", () => {
 		];
 		const block = renderCalendarBlock(calendars, new Map([["work", events]]), "UTC");
 		expect(eventLines(block)).toBe(`${WORK_HEADING}\n- [ ] Standup\n- [ ] Retro`);
-		expect(block.split("<!-- dailycalsync:index")).toHaveLength(2);
-		expect([...extractPreservedEvents(block).keys()]).toEqual(["work::a-1", "work::b-1"]);
+		expect(block.split(INDEX_OPEN)).toHaveLength(2);
+		expect([...extractPreservedEvents(block).keys()]).toEqual(
+			["work::a-1", "work::b-1"].map(eventStateKey)
+		);
 	});
 
 	it("round-trips checkbox state and annotations through the index alone", () => {
@@ -317,11 +322,11 @@ describe("renderCalendarBlock", () => {
 			.replace("- [ ] Retro", "- [ ] Retro\n  - user-authored detail");
 
 		const preserved = extractPreservedEvents(edited);
-		expect(preserved.get("work::a-1")).toMatchObject({
+		expect(preserved.get(eventStateKey("work::a-1"))).toMatchObject({
 			checked: true,
 			inlineAnnotation: "bring the report",
 		});
-		expect(preserved.get("work::b-1")?.nestedAnnotations).toEqual(["  - user-authored detail"]);
+		expect(preserved.get(eventStateKey("work::b-1"))?.nestedAnnotations).toEqual(["  - user-authored detail"]);
 
 		const second = renderCalendarBlock(
 			calendars,
@@ -351,8 +356,8 @@ describe("renderCalendarBlock", () => {
 		const edited = block.replace("- [ ] Retro", "- [x] Weekly retro\n  - ask Dana");
 
 		const preserved = extractPreservedEvents(edited);
-		expect(preserved.get("work::a-1")?.checked).toBe(false);
-		expect(preserved.get("work::b-1")).toMatchObject({
+		expect(preserved.get(eventStateKey("work::a-1"))?.checked).toBe(false);
+		expect(preserved.get(eventStateKey("work::b-1"))).toMatchObject({
 			checked: true,
 			inlineAnnotation: "",
 			nestedAnnotations: ["  - ask Dana"],
@@ -369,9 +374,9 @@ describe("renderCalendarBlock", () => {
 		const edited = block.replace("- [ ] Retro\n", "").replace("- [ ] Demo", "- [x] Product demo");
 
 		const preserved = extractPreservedEvents(edited);
-		expect(preserved.get("work::a-1")?.checked).toBe(false);
-		expect(preserved.has("work::b-1")).toBe(false);
-		expect(preserved.has("work::c-1")).toBe(false);
+		expect(preserved.get(eventStateKey("work::a-1"))?.checked).toBe(false);
+		expect(preserved.has(eventStateKey("work::b-1"))).toBe(false);
+		expect(preserved.has(eventStateKey("work::c-1"))).toBe(false);
 	});
 
 	it("keeps the orphan notice from stacking up on a preserved annotation", () => {
@@ -420,8 +425,8 @@ describe("renderCalendarBlock", () => {
 		);
 		const edited = block.replace("- [ ] Quarter break", "- [x] Quarter break");
 		const preserved = extractPreservedEvents(edited);
-		expect(preserved.get("x::dup")?.checked).toBe(true);
-		expect(preserved.get("personal::dup")?.checked).toBe(false);
+		expect(preserved.get(eventStateKey("x::dup"))?.checked).toBe(true);
+		expect(preserved.get(eventStateKey("personal::dup"))?.checked).toBe(false);
 	});
 
 	it("preserves checkbox state and attached annotations for a single-day event", () => {
@@ -449,7 +454,7 @@ describe("renderCalendarBlock", () => {
 		);
 		expect(block).toContain("- [x] 09:00-09:30 Standup follow up with Alice");
 		expect(block).toContain("  - user-authored detail");
-		expect(block).toContain(`${encodeEventKey(key)} `);
+		expect(block).toContain(`${INDEX_OPEN} ${eventStateKey(key)}:`);
 	});
 
 	it("escapes event Markdown and rejects non-Google event links", () => {
@@ -463,9 +468,7 @@ describe("renderCalendarBlock", () => {
 		const block = renderCalendarBlock(calendars, new Map([["work", [event]]]));
 		expect(block).not.toContain("](javascript:");
 		expect(block).not.toContain("<!-- dailycalsync:calendar:end -->");
-		expect(block).toContain(
-			encodeEventKey(multiDayEventKey("work", event.id!))
-		);
+		expect(block).toContain(eventStateKey(multiDayEventKey("work", event.id!)));
 	});
 
 	it("redacts private event details when configured", () => {

@@ -1,5 +1,5 @@
 import { App, Modal, Setting } from "obsidian";
-import type { MultiDayConfirmation } from "./sync";
+import type { MultiDayConfirmation, MultiDayDecision } from "./sync";
 
 class MultiDayCompletionModal extends Modal {
 	private settled = false;
@@ -7,7 +7,7 @@ class MultiDayCompletionModal extends Modal {
 	constructor(
 		app: App,
 		private readonly request: MultiDayConfirmation,
-		private readonly resolveChoice: (propagate: boolean) => void
+		private readonly resolveChoice: (decision: MultiDayDecision) => void
 	) {
 		super(app);
 	}
@@ -15,18 +15,23 @@ class MultiDayCompletionModal extends Modal {
 	onOpen(): void {
 		this.contentEl.createEl("h3", { text: "Multi-day event completed" });
 		this.contentEl.createEl("p", {
-			text: `“${this.request.title}” is checked on ${this.request.completedFrom}. Mark it done from that date through ${this.request.eventEnd}, including notes that have not been synced yet?`,
+			text: `\u201C${this.request.title}\u201D is checked on ${this.request.completedFrom}. Mark its other days done too, including notes that have not been synced yet?`,
 		});
 
 		new Setting(this.contentEl)
 			.addButton((button) =>
-				button.setButtonText("Keep days separate").onClick(() => this.finish(false))
+				button.setButtonText("Keep days separate").onClick(() => this.finish("separate"))
 			)
 			.addButton((button) =>
 				button
-					.setButtonText("Mark following done")
+					.setButtonText(`Through ${this.request.eventEnd}`)
+					.onClick(() => this.finish("following"))
+			)
+			.addButton((button) =>
+				button
+					.setButtonText(`Whole event (${this.request.eventStart}\u2013${this.request.eventEnd})`)
 					.setCta()
-					.onClick(() => this.finish(true))
+					.onClick(() => this.finish("whole"))
 			);
 	}
 
@@ -34,14 +39,14 @@ class MultiDayCompletionModal extends Modal {
 		this.contentEl.empty();
 		if (!this.settled) {
 			this.settled = true;
-			this.resolveChoice(false);
+			this.resolveChoice("separate");
 		}
 	}
 
-	private finish(propagate: boolean): void {
+	private finish(decision: MultiDayDecision): void {
 		if (this.settled) return;
 		this.settled = true;
-		this.resolveChoice(propagate);
+		this.resolveChoice(decision);
 		this.close();
 	}
 }
@@ -49,6 +54,6 @@ class MultiDayCompletionModal extends Modal {
 export function confirmMultiDayCompletion(
 	app: App,
 	request: MultiDayConfirmation
-): Promise<boolean> {
+): Promise<MultiDayDecision> {
 	return new Promise((resolve) => new MultiDayCompletionModal(app, request, resolve).open());
 }

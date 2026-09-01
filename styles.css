@@ -36,14 +36,8 @@
 	align-items: center;
 	gap: 0.45em;
 	font-size: var(--font-smaller);
-	letter-spacing: 0.06em;
-	text-transform: uppercase;
-	color: var(--text-muted);
-}
-
-.dailycalsync-calendar-heading strong {
 	font-weight: var(--font-semibold);
-	color: inherit;
+	color: var(--text-muted);
 }
 
 .dailycalsync-calendar-label {

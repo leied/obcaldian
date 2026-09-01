@@ -14,8 +14,9 @@ import {
 } from "./googleCalendar";
 import {
 	calendarSectionFromContent,
-	eventIsCheckedInNote,
+	eventCheckStateInNote,
 	eventIsIncluded,
+	eventStateKey,
 	extractPreservedEvents,
 	notePathFor,
 	renderCalendarBlock,
@@ -97,15 +98,24 @@ export interface SyncUndoSnapshot {
 export interface MultiDayConfirmation {
 	eventKey: string;
 	title: string;
+	/** Earliest day the user has already checked. */
 	completedFrom: string;
+	eventStart: string;
 	eventEnd: string;
 }
+
+/**
+ * What to do with the rest of a multi-day event's days: leave them alone, mark
+ * the ones from `completedFrom` onward, or mark the entire span including days
+ * before it.
+ */
+export type MultiDayDecision = "separate" | "following" | "whole";
 
 export interface SyncOptions {
 	/** Whether to surface result Notices. Defaults to true. False is used by background sync. */
 	notify?: boolean;
 	/** UI callback used only by interactive syncs when multi-day behavior is ask. */
-	confirmMultiDay?: (request: MultiDayConfirmation) => Promise<boolean>;
+	confirmMultiDay?: (request: MultiDayConfirmation) => Promise<MultiDayDecision>;
 	/** Optional manual-sync preview. Return false to cancel without writing. */
 	preview?: (plan: SyncPlan) => Promise<boolean>;
 	/** Receives the managed-section snapshot used by the undo command. */
@@ -125,6 +135,8 @@ export interface SyncOptions {
 
 interface CheckedResolution {
 	checkedByDate: Map<string, Set<string>>;
+	/** Events whose propagation the user undid, to be written back as not done. */
+	clearedByDate: Map<string, Set<string>>;
 	rules: Record<string, MultiDayCompletionRule>;
 	rulesChanged: boolean;
 }
@@ -306,6 +318,7 @@ async function resolveCheckedEvents(
 	const settings = deps.settings;
 	const groups = collectMultiDayGroups(deps, days);
 	const checkedByDate = new Map(days.map((day) => [day.dateKey, new Set<string>()]));
+	const clearedByDate = new Map(days.map((day) => [day.dateKey, new Set<string>()]));
 	const contentByDate = new Map<string, string | null>();
 	const rules = { ...settings.multiDayCompletionRules };
 	let rulesChanged = false;
@@ -325,40 +338,65 @@ async function resolveCheckedEvents(
 			rulesChanged = true;
 		}
 	}
+	const behavior = settings.multiDayCompletionBehavior;
 	for (const group of groups) {
 		const spanDates = datesInSpan(group.span);
-		const checkedDates: string[] = [];
+		const noteStates = new Map<string, boolean | null>();
 		for (const dateKey of spanDates) {
 			const content = await readDate(dateKey);
-			if (content && eventIsCheckedInNote(content, group.eventKey)) checkedDates.push(dateKey);
+			noteStates.set(dateKey, content ? eventCheckStateInNote(content, group.eventKey) : null);
 		}
-		let rule =
-			settings.multiDayCompletionBehavior === "independent" ? undefined : rules[group.eventKey];
+		const checkedDates = spanDates.filter((dateKey) => noteStates.get(dateKey) === true);
+		let rule = behavior === "independent" ? undefined : rules[group.eventKey];
 		if (rule && rule.eventEnd !== group.span.endDate) {
 			rule = { ...rule, eventEnd: group.span.endDate };
 			rules[group.eventKey] = rule;
 			rulesChanged = true;
 		}
-		const completedFrom = checkedDates.sort()[0];
-		const uncheckedFollowingDay =
-			completedFrom &&
-			spanDates.some((dateKey) => dateKey >= completedFrom && !checkedDates.includes(dateKey));
-		if (!rule && uncheckedFollowingDay) {
-			let propagate = settings.multiDayCompletionBehavior === "following";
-			if (
-				settings.multiDayCompletionBehavior === "ask" &&
-				(opts.notify ?? true) &&
-				opts.confirmMultiDay
-			) {
-				propagate = await opts.confirmMultiDay({
+		// A day the rule had marked done now reads as not done, so the user cleared
+		// it. Retire the rule and clear the whole span, or the next sync would just
+		// tick the box again and completion could never be undone.
+		const clearedDay =
+			rule &&
+			spanDates.find(
+				(dateKey) =>
+					dateKey >= rule!.completedFrom &&
+					dateKey <= rule!.eventEnd &&
+					noteStates.get(dateKey) === false
+			);
+		if (rule && clearedDay) {
+			delete rules[group.eventKey];
+			rulesChanged = true;
+			for (const day of days) {
+				if (spanDates.includes(day.dateKey)) clearedByDate.get(day.dateKey)?.add(group.eventKey);
+			}
+			continue;
+		}
+		const firstChecked: string | undefined = checkedDates[0];
+		// "following" can only ever reach days after the first tick; the other modes,
+		// and the prompt's whole-event option, reach back to the start of the span —
+		// so checking the last day still has something to offer.
+		const offerFrom = behavior === "following" ? firstChecked : group.span.startDate;
+		if (!rule && firstChecked !== undefined && offerFrom !== undefined) {
+			const incomplete = spanDates.some(
+				(dateKey) => dateKey >= offerFrom && !checkedDates.includes(dateKey)
+			);
+			let decision: MultiDayDecision =
+				behavior === "all" ? "whole" : behavior === "following" ? "following" : "separate";
+			if (incomplete && behavior === "ask" && (opts.notify ?? true) && opts.confirmMultiDay) {
+				decision = await opts.confirmMultiDay({
 					eventKey: group.eventKey,
 					title: group.title,
-					completedFrom,
+					completedFrom: firstChecked,
+					eventStart: group.span.startDate,
 					eventEnd: group.span.endDate,
 				});
 			}
-			if (propagate) {
-				rule = { completedFrom, eventEnd: group.span.endDate };
+			if (incomplete && decision !== "separate") {
+				rule = {
+					completedFrom: decision === "whole" ? group.span.startDate : firstChecked,
+					eventEnd: group.span.endDate,
+				};
 				rules[group.eventKey] = rule;
 				rulesChanged = true;
 			}
@@ -371,7 +409,7 @@ async function resolveCheckedEvents(
 			}
 		}
 	}
-	return { checkedByDate, rules, rulesChanged };
+	return { checkedByDate, clearedByDate, rules, rulesChanged };
 }
 
 async function preflightFolder(vault: Vault, deps: AuthDeps): Promise<void> {
@@ -424,8 +462,11 @@ async function prepareSync(
 	const currentKeys = new Set(
 		days.flatMap((day) => [...eventKeysForDay(day, deps.settings.rendering)])
 	);
+	// Notes name events by `eventStateKey`, so every lookup into a preserved map
+	// goes through it; `previousLocations` is in-memory and stays on the event key.
 	for (const eventKey of currentKeys) {
-		if (globalPreserved.has(eventKey)) continue;
+		const stateKey = eventStateKey(eventKey);
+		if (globalPreserved.has(stateKey)) continue;
 		for (const previousDate of previousLocations.get(eventKey) ?? []) {
 			const sourcePath = notePathFor(
 				deps.settings,
@@ -433,14 +474,14 @@ async function prepareSync(
 			);
 			const sourceFile = vault.getAbstractFileByPath(sourcePath);
 			if (!(sourceFile instanceof TFile)) continue;
-			const state = extractPreservedEvents(await vault.read(sourceFile)).get(eventKey);
+			const state = extractPreservedEvents(await vault.read(sourceFile)).get(stateKey);
 			if (state) {
-				globalPreserved.set(eventKey, state);
+				globalPreserved.set(stateKey, state);
 				break;
 			}
 		}
 	}
-	const allRenderedKeys = currentKeys;
+	const allRenderedKeys = new Set([...currentKeys].map(eventStateKey));
 	const entries: SyncPlanEntry[] = [];
 	for (const day of days) {
 		const path = notePathFor(deps.settings, day.date);
@@ -469,15 +510,21 @@ async function prepareSync(
 			for (const event of events) {
 				if (!eventIsIncluded(event, deps.settings.rendering)) continue;
 				const eventKey = eventOccurrenceKey(calendarId, event);
-				const state = eventKey ? globalPreserved.get(eventKey) : undefined;
-				if (eventKey && state && !preserved.has(eventKey)) {
-					preserved.set(eventKey, {
+				const stateKey = eventKey ? eventStateKey(eventKey) : null;
+				const state = stateKey ? globalPreserved.get(stateKey) : undefined;
+				if (stateKey && state && !preserved.has(stateKey)) {
+					preserved.set(stateKey, {
 						...state,
 						// Multi-day completion is date-specific and is resolved separately above.
 						checked: multiDaySpan(event, deps.settings.timezone) ? false : state.checked,
 					});
 				}
 			}
+		}
+		for (const eventKey of checked.clearedByDate.get(day.dateKey) ?? []) {
+			const stateKey = eventStateKey(eventKey);
+			const state = preserved.get(stateKey);
+			if (state?.checked) preserved.set(stateKey, { ...state, checked: false });
 		}
 		const renderedBlock = renderCalendarBlock(
 			day.calendars,

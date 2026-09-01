@@ -9,8 +9,6 @@ import {
 import type { GoogleEvent } from "./googleCalendar";
 import {
 	dayNumberInSpan,
-	decodeEventKey,
-	encodeEventKey,
 	eventKeyFromMarkerLine,
 	eventOccurrenceKey,
 	multiDaySpan,
@@ -152,11 +150,13 @@ function markerRange(content: string): {
 
 const INDEX_OPEN = "<!-- dailycalsync:index";
 const INDEX_CLOSE = "-->";
+const INDEX_ROW = /^([0-9a-z]+):(\d+):([0-9a-z]+)$/;
 const LIST_PREFIX = /^\s*- (?:\[[ xX]\] )?/;
 const ORPHAN_NOTE = "  > Event no longer returned by Google; annotation preserved.";
 
 interface EventIndexEntry {
-	key: string;
+	/** An `eventStateKey`, not the event key it was derived from. */
+	stateKey: string;
 	/** How many characters of the line, after its list prefix, this plugin wrote. */
 	length: number;
 	digest: string;
@@ -168,8 +168,8 @@ interface EventIndex {
 	blockLines: Set<number>;
 }
 
-function fnv1a(text: string): string {
-	let hash = 2_166_136_261;
+function fnv1a(text: string, seed = 2_166_136_261): string {
+	let hash = seed;
 	for (let index = 0; index < text.length; index += 1) {
 		hash ^= text.charCodeAt(index);
 		hash = Math.imul(hash, 16_777_619);
@@ -178,15 +178,28 @@ function fnv1a(text: string): string {
 }
 
 /**
- * The index records identity for every rendered event in one comment at the end
- * of the block, so no event line has to carry a marker of its own. Each row is
- * `<encoded key> <generated length> <digest>`: the length says where this
- * plugin's text stops and a user's inline annotation begins, and the digest
- * confirms the line really is that event before its state is reused.
+ * The note-facing name for an event occurrence. Google's own keys run to ~200
+ * characters once a calendar ID and event ID are encoded, and a note holds one
+ * per event, so the index stores this digest instead — nothing ever needs to
+ * read a key back out of a note, only to look one up. Two rounds keep the
+ * collision odds negligible across a sync range; a collision would attach one
+ * event's checkbox to another, not corrupt anything.
+ */
+export function eventStateKey(eventKey: string): string {
+	return `${fnv1a(eventKey)}${fnv1a(eventKey, 0x81_1c_9d_c5 ^ 0x5b_f0_36_35)}`;
+}
+
+/**
+ * The index records identity for every rendered event in a single comment line
+ * at the end of the block, so no event line has to carry a marker of its own.
+ * Each `key:length:digest` triple names an event by `eventStateKey`, says how
+ * many characters of its line this plugin wrote (where a user's inline
+ * annotation therefore begins), and carries a digest of that text so the line
+ * can be confirmed as still being that event before its state is reused.
  */
 function renderEventIndex(entries: EventIndexEntry[]): string {
-	const rows = entries.map((entry) => `${encodeEventKey(entry.key)} ${entry.length} ${entry.digest}`);
-	return [INDEX_OPEN, ...rows, INDEX_CLOSE].join("\n");
+	const rows = entries.map((entry) => `${entry.stateKey}:${entry.length}:${entry.digest}`);
+	return `${INDEX_OPEN} ${rows.join(" ")} ${INDEX_CLOSE}`;
 }
 
 function parseEventIndex(lines: string[]): EventIndex {
@@ -194,18 +207,12 @@ function parseEventIndex(lines: string[]): EventIndex {
 	const blockLines = new Set<number>();
 	const openIndex = lines.findIndex((line) => line.trimStart().startsWith(INDEX_OPEN));
 	if (openIndex === -1) return { entries, blockLines };
-	for (let index = openIndex; index < lines.length; index += 1) {
-		blockLines.add(index);
-		const line = lines[index].trim();
-		if (index === openIndex) continue;
-		// A missing close means the note was mangled; stop at the blank line that
-		// always precedes the index rather than swallowing the rest of the block.
-		if (line === INDEX_CLOSE || line === "") break;
-		const [encodedKey, rawLength, digest] = line.split(" ");
-		const key = encodedKey ? decodeEventKey(encodedKey) : null;
-		const length = Number(rawLength);
-		if (!key || !digest || !Number.isInteger(length) || length < 0) continue;
-		entries.push({ key, length, digest });
+	blockLines.add(openIndex);
+	const body = lines[openIndex].trim().slice(INDEX_OPEN.length);
+	for (const row of body.slice(0, body.lastIndexOf(INDEX_CLOSE)).trim().split(/\s+/)) {
+		const match = row.match(INDEX_ROW);
+		if (!match) continue;
+		entries.push({ stateKey: match[1], length: Number(match[2]), digest: match[3] });
 	}
 	return { entries, blockLines };
 }
@@ -250,7 +257,10 @@ function collectNestedAnnotations(
 	return { nestedAnnotations, lastLine };
 }
 
-/** Reads checkbox state and explicitly attached inline/indented user annotations. */
+/**
+ * Reads checkbox state and explicitly attached inline/indented user annotations,
+ * keyed by `eventStateKey` rather than by the event key itself.
+ */
 export function extractPreservedEvents(content: string): Map<string, PreservedEventState> {
 	const section = calendarSectionFromContent(content) ?? content;
 	const lines = section.split("\n");
@@ -266,8 +276,8 @@ export function extractPreservedEvents(content: string): Map<string, PreservedEv
 		if (!legacyKey && !prefix) continue;
 		const { nestedAnnotations, lastLine } = collectNestedAnnotations(lines, index, blockLines);
 		index = lastLine;
-		const state = (eventKey: string, inlineAnnotation: string): void => {
-			preserved.set(eventKey, {
+		const state = (stateKey: string, inlineAnnotation: string): void => {
+			preserved.set(stateKey, {
 				checked: /^\s*- \[[xX]\]/.test(line),
 				inlineAnnotation,
 				nestedAnnotations,
@@ -278,14 +288,14 @@ export function extractPreservedEvents(content: string): Map<string, PreservedEv
 			// Notes written before the index carry a marker on the event line itself.
 			const markerStart = line.search(/<!-- (?:dailycalsync|obcaldian):event:/);
 			const markerEnd = markerStart === -1 ? -1 : line.indexOf(" -->", markerStart);
-			state(legacyKey, markerEnd === -1 ? "" : line.slice(markerEnd + 4).trim());
+			state(eventStateKey(legacyKey), markerEnd === -1 ? "" : line.slice(markerEnd + 4).trim());
 			continue;
 		}
 		const body = line.slice(prefix![0].length);
 		const entry = matchIndexedLine(body, entries, claimed);
 		if (entry) {
 			claimed.add(entry);
-			state(entry.key, body.slice(entry.length).trim());
+			state(entry.stateKey, body.slice(entry.length).trim());
 		} else {
 			unidentified.push({ line, nestedAnnotations });
 		}
@@ -299,7 +309,7 @@ export function extractPreservedEvents(content: string): Map<string, PreservedEv
 	if (unclaimed.length > 0 && unclaimed.length === unidentified.length) {
 		unclaimed.forEach((entry, position) => {
 			const { line, nestedAnnotations } = unidentified[position];
-			preserved.set(entry.key, {
+			preserved.set(entry.stateKey, {
 				checked: /^\s*- \[[xX]\]/.test(line),
 				inlineAnnotation: "",
 				nestedAnnotations,
@@ -310,9 +320,15 @@ export function extractPreservedEvents(content: string): Map<string, PreservedEv
 	return preserved;
 }
 
-/** Whether the note shows this event as done, reading either identity scheme. */
-export function eventIsCheckedInNote(content: string, eventKey: string): boolean {
-	return Boolean(extractPreservedEvents(content).get(eventKey)?.checked);
+/**
+ * How the note shows this event, reading either identity scheme: done, not
+ * done, or `null` when the note has no line for it at all. The third case
+ * matters — a day that was never synced must not be read as "the user cleared
+ * this".
+ */
+export function eventCheckStateInNote(content: string, eventKey: string): boolean | null {
+	const state = extractPreservedEvents(content).get(eventStateKey(eventKey));
+	return state ? state.checked : null;
 }
 
 const FOOTNOTE_CONTINUATION_INDENT = "    ";
@@ -325,6 +341,21 @@ function safeInlineText(value: string): string {
 		.trim()
 		.replace(/\\/g, "\\\\")
 		.replace(/([`*_{}[\]()#+!|<>])/g, "\\$1");
+}
+
+/**
+ * Text placed inside the raw HTML of the calendar heading. Obsidian's Live
+ * Preview passes inline HTML through without running Markdown on its contents,
+ * so `**bold**` and `\|` escapes would both show up literally there; the name
+ * goes in as plain text and `styles.css` supplies the weight.
+ */
+function safeHtmlText(value: string): string {
+	return value
+		.replace(/\s+/g, " ")
+		.trim()
+		.replace(/&/g, "&amp;")
+		.replace(/</g, "&lt;")
+		.replace(/>/g, "&gt;");
 }
 
 function safeMultilineText(value: string): string {
@@ -512,7 +543,9 @@ export function renderCalendarBlock(
 	renderDate?: string,
 	checkedEventKeys: ReadonlySet<string> = new Set(),
 	rendering: RenderingSettings = DEFAULT_RENDERING_SETTINGS,
+	/** Keyed by `eventStateKey`, as returned by `extractPreservedEvents`. */
 	preservedEvents: ReadonlyMap<string, PreservedEventState> = new Map(),
+	/** `eventStateKey`s rendered elsewhere in this sync, so they are not called orphans here. */
 	suppressOrphanKeys: ReadonlySet<string> = new Set()
 ): string {
 	const lines: string[] = [];
@@ -543,12 +576,13 @@ export function renderCalendarBlock(
 		// this heading (and everything under it) into that list as a continuation.
 		if (lines.length > 0) lines.push("");
 		lines.push(
-			`<span class="dailycalsync-calendar-heading"><span class="${dotClasses.join(" ")}"></span>**${safeInlineText(cal.summary)}**</span>`
+			`<span class="dailycalsync-calendar-heading"><span class="${dotClasses.join(" ")}"></span>${safeHtmlText(cal.summary)}</span>`
 		);
 		for (const ev of events) {
 			const span = multiDaySpan(ev, timeZone);
 			const eventKey = eventOccurrenceKey(cal.id, ev);
-			const previous = eventKey ? preservedEvents.get(eventKey) : undefined;
+			const stateKey = eventKey ? eventStateKey(eventKey) : null;
+			const previous = stateKey ? preservedEvents.get(stateKey) : undefined;
 			const checked = eventKey
 				? checkedEventKeys.has(eventKey) || Boolean(previous?.checked)
 				: false;
@@ -579,21 +613,21 @@ export function renderCalendarBlock(
 			const generated = `${time ? `${time} ` : ""}${title}${dayLabel}${footnoteMarker}`;
 			lines.push(`${bullet} ${generated}${annotation}`);
 			if (previous?.nestedAnnotations.length) lines.push(...previous.nestedAnnotations);
-			if (eventKey) {
-				renderedEventKeys.add(eventKey);
-				indexEntries.push({ key: eventKey, length: generated.length, digest: fnv1a(generated) });
+			if (stateKey) {
+				renderedEventKeys.add(stateKey);
+				indexEntries.push({ stateKey, length: generated.length, digest: fnv1a(generated) });
 			}
 		}
 	}
 	const orphanedAnnotations = [...preservedEvents.entries()].filter(
-		([eventKey, state]) =>
-			!renderedEventKeys.has(eventKey) &&
-			!suppressOrphanKeys.has(eventKey) &&
+		([stateKey, state]) =>
+			!renderedEventKeys.has(stateKey) &&
+			!suppressOrphanKeys.has(stateKey) &&
 			(Boolean(state.inlineAnnotation) || state.nestedAnnotations.length > 0)
 	);
 	if (orphanedAnnotations.length > 0) {
 		lines.push("", "**Unmatched calendar annotations**");
-		for (const [eventKey, state] of orphanedAnnotations) {
+		for (const [stateKey, state] of orphanedAnnotations) {
 			lines.push(state.originalLine, ...state.nestedAnnotations, ORPHAN_NOTE);
 			// A replayed line keeps whatever split it already had, so the annotation
 			// that made it an orphan is still read back as one on the next sync. A
@@ -606,7 +640,7 @@ export function renderCalendarBlock(
 				? body.length - state.inlineAnnotation.length
 				: body.length;
 			indexEntries.push({
-				key: eventKey,
+				stateKey,
 				length: generatedLength,
 				digest: fnv1a(body.slice(0, generatedLength)),
 			});

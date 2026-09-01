@@ -4,6 +4,7 @@ import { getValidAccessToken, googleAccount } from "./googleAuth";
 import { googleRequest } from "./network";
 import { GoogleHttpError } from "./network";
 import { zonedDayRange } from "./timezone";
+import type { CalendarEventCache } from "./settings";
 
 export interface GoogleCalendarListEntry {
 	id: string;
@@ -170,8 +171,81 @@ export function calendarCacheEvents(deps: AuthDeps, calendarId: string): GoogleE
 	});
 }
 
+/**
+ * Only these are ever read back. A Google event resource also carries
+ * `conferenceData`, `reminders`, `creator`, `organizer`, `extendedProperties`,
+ * `etag` and more, none of which this plugin renders — and the cache lives in
+ * plaintext `data.json`, so keeping them costs disk and needlessly parks other
+ * people's data at rest.
+ */
+const CACHED_EVENT_FIELDS = [
+	"id",
+	"summary",
+	"description",
+	"location",
+	"htmlLink",
+	"hangoutLink",
+	"status",
+	"visibility",
+	"transparency",
+	"eventType",
+	"recurringEventId",
+	"originalStartTime",
+	"start",
+	"end",
+] as const;
+
+const CACHED_ATTENDEE_FIELDS = ["email", "displayName", "self", "responseStatus"] as const;
+
+function project<T extends object>(source: T, fields: readonly string[]): Record<string, unknown> {
+	const record: Record<string, unknown> = {};
+	for (const field of fields) {
+		const value = (source as Record<string, unknown>)[field];
+		if (value !== undefined) record[field] = value;
+	}
+	return record;
+}
+
 function eventRecord(event: GoogleEvent): Record<string, unknown> {
-	return event as unknown as Record<string, unknown>;
+	const record = project(event, CACHED_EVENT_FIELDS);
+	if (event.attendees) {
+		record.attendees = event.attendees.map((attendee) =>
+			project(attendee, CACHED_ATTENDEE_FIELDS)
+		);
+	}
+	return record;
+}
+
+/** Days of already-finished events kept so moved annotations can still be found. */
+const CACHE_RETENTION_DAYS = 30;
+
+function endedBefore(event: GoogleEvent, cutoff: number): boolean {
+	// All-day ends are exclusive, so `end.date` is already the morning after.
+	const end = event.end.dateTime ?? (event.end.date ? `${event.end.date}T00:00:00Z` : null);
+	const parsed = end ? Date.parse(end) : Number.NaN;
+	return Number.isFinite(parsed) && parsed < cutoff;
+}
+
+/**
+ * Incremental syncs only ever merge events in — without this the cache keeps
+ * every event and every deletion tombstone the calendar has ever had. Anything
+ * that ended before the retention window is dropped, and `coverageStart` moves
+ * up with it so a later request for those days rebuilds from Google instead of
+ * trusting a cache that no longer holds them.
+ */
+export function pruneCalendarCache(
+	cache: CalendarEventCache,
+	requiredStart: Date,
+	now = Date.now()
+): void {
+	const cutoff = Math.min(now - CACHE_RETENTION_DAYS * 86_400_000, requiredStart.getTime());
+	for (const [key, value] of Object.entries(cache.events)) {
+		const event = storedEvent(value);
+		if (!event || endedBefore(event, cutoff)) delete cache.events[key];
+	}
+	if (Date.parse(cache.coverageStart) < cutoff) {
+		cache.coverageStart = new Date(cutoff).toISOString();
+	}
 }
 
 function mergeEventChange(
@@ -261,6 +335,7 @@ export async function refreshCalendarCache(
 		for (const event of result.items) mergeEventChange(cache.events, event);
 		cache.syncToken = result.nextSyncToken;
 		cache.updatedAt = Date.now();
+		pruneCalendarCache(cache, requiredStart);
 		return calendarCacheEvents(deps, calendarId);
 	} catch (error) {
 		if (error instanceof GoogleHttpError && error.status === 410) {

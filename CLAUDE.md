@@ -4,9 +4,9 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## What this is
 
-Obcaldian is an Obsidian plugin (desktop-only). It generates daily notes from a user-provided
-template and keeps a plugin-managed section of those notes in sync with selected Google
-Calendars. `main.js` is a bundled build artifact (esbuild output with a generated-file banner) —
+DailyCalSync is an Obsidian plugin (desktop-only). It generates daily notes from a user-provided
+template and keeps a plugin-managed section of those notes in sync with multiple Google accounts
+and Secret iCalendar feeds. `main.js` is a bundled build artifact (esbuild output with a generated-file banner) —
 never edit it directly; edit `src/*.ts`.
 
 ## Commands
@@ -31,13 +31,13 @@ builds, tests, validates, attests the artifacts, and creates a draft GitHub Rele
 `manifest.json`, `styles.css`, and a zipped copy.
 
 To manually exercise the plugin, symlink or copy this repo (built) into an Obsidian vault's
-`.obsidian/plugins/obcaldian/` folder and enable it in Obsidian's Community Plugins settings.
+`.obsidian/plugins/dailycalsync/` folder and enable it in Obsidian's Community Plugins settings.
 
 ### Tests
 
 `tests/` is excluded from `tsconfig.json`'s project (`npm run build`'s `tsc -noEmit` never
 type-checks it) so test fakes don't need to satisfy Obsidian's full interfaces exactly. The real
-`obsidian` npm package ships types only, no runtime — `vitest.config.ts` aliases `"obsidian"` to
+`obsidian` npm package ships types only, no runtime — `vitest.config.mts` aliases `"obsidian"` to
 `tests/mocks/obsidian.ts`, a minimal runtime stand-in (`TFile`, `Notice`, `SecretStorage`,
 `normalizePath`, a stub `requestUrl` that throws if actually called). `tests/setup.ts` pins
 `process.env.TZ = "UTC"` and stubs `window.moment` so default-timezone rendering and date fixtures
@@ -52,8 +52,8 @@ migration).
 Module responsibilities in `src/`, in dependency order:
 
 - **`settings.ts`** — persisted types, defaults, sequential schema migrations, and defensive
-  validation/repair. It includes rendering/privacy controls, sync health, failure history, Daily
-  Notes integration, and per-calendar event caches.
+  validation/repair. Schema v6 includes isolated Google profiles, iCalendar metadata/caches,
+  rendering/privacy controls, sync health, failure history, Daily Notes integration, and onboarding.
   `timezone` defaults to the system's IANA zone (`Intl.DateTimeFormat().resolvedOptions().timeZone`)
   but is user-overridable. Notably absent: the Google client secret and OAuth tokens — those live in
   Obsidian's secret storage, not here (see `googleAuth.ts`), since this object is persisted to
@@ -66,21 +66,25 @@ Module responsibilities in `src/`, in dependency order:
 - **`googleAuth.ts`** — the Google OAuth "installed app" loopback flow with desktop-credentials JSON
   import, PKCE, a state nonce, cancellation/timeout, and guaranteed cleanup. It opens the system
   browser, spins up a local `http` server on `127.0.0.1:42813`, exchanges the code for tokens, and
-  refreshes access tokens on expiry (`getValidAccessToken`). The desktop-only dynamic `node:http`
-  import is why `manifest.json` sets `isDesktopOnly: true`. All
+  refreshes access tokens on expiry (`getValidAccessToken`). Its static `node:http` import bundles
+  to CommonJS `require`, which is compatible with Obsidian and is why `manifest.json` sets
+  `isDesktopOnly: true`. All
   auth-dependent functions take an `AuthDeps` (`{ settings, saveSettings, secretStorage }`) rather
   than the plugin instance, keeping this module decoupled from `main.ts`.
   - Client secret and access/refresh tokens are stored via `App.secretStorage` (Obsidian API
     `1.11.4+` — `setSecret`/`getSecret`/`listSecrets`, ids must be lowercase-alphanumeric-with-dashes,
-    e.g. `obcaldian-google-refresh-token`). There is no delete API; "disconnect" overwrites with an
+    e.g. `dailycalsync-google-<profile>-refresh-token`). There is no delete API; "disconnect" overwrites with an
     empty string. `isConnected(deps)` is the source of truth for connected-state (a recorded
     `tokenExpiresAt` *and* a present refresh-token secret), replacing the old `settings.tokens`
     check.
   - `migrateLegacySecrets` is a one-time migration (called from `main.ts`'s `loadSettings`) that
     lifts a pre-secret-storage `data.json`'s plaintext `googleClientSecret`/`tokens.{accessToken,
     refreshToken,expiresAt}` into secret storage and strips them from the saved settings object.
-- **`network.ts`** — the only production module allowed to call `requestUrl`; enforces the Google
-  host allowlist and bounded, cancellable `429`/`5xx` retries with `Retry-After`, backoff, and jitter.
+- **`network.ts`** — the only production module allowed to call `requestUrl`; enforces the fixed
+  Google host allowlist, validates user-selected iCalendar HTTPS URLs, and provides bounded,
+  cancellable retries.
+- **`ical.ts`** — SecretStorage URL access, defensive ICS parsing, and bounded recurrence expansion
+  for daily, weekly, monthly, and yearly feeds.
 - **`timezone.ts`** — pure, no Obsidian dependency. `zonedDayRange(year, month, day, timeZone)`
   resolves the UTC instants for midnight-to-midnight of a given calendar day in an arbitrary IANA
   zone, via `Intl.DateTimeFormat` offset reconstruction (no `moment-timezone` dependency). Used so
@@ -104,7 +108,7 @@ Module responsibilities in `src/`, in dependency order:
     creating an unusable note.
   - The template supports a `{{date}}` placeholder and a literal `{calendar}` token, which gets
     replaced by an HTML-comment-delimited marker block
-    (`<!-- obcaldian:calendar:start -->` / `...:end -->`).
+    (`<!-- dailycalsync:calendar:start -->` / `...:end -->`).
   - `syncNoteCalendarSection` finds those markers in an existing note and replaces only the content
     between them, leaving the rest of the note (including user edits) untouched. If the markers are
     missing, it no-ops and shows a `Notice` rather than guessing where to insert.
@@ -127,7 +131,8 @@ Module responsibilities in `src/`, in dependency order:
   an in-memory plan, preflights every template/target/marker, offers manual preview, rechecks files
   after preview, applies writes with rollback, and emits a managed-section-only undo snapshot.
   Date-range limits, update-existing-only mode, multi-day completion, moved-annotation lookup,
-  per-calendar health, categorized failures, and stale-write protection all live here.
+  per-calendar health, categorized failures, multi-profile Google and iCalendar sources, and
+  stale-write protection all live here.
   `SyncOptions.confirmMultiDay` keeps Modal/UI concerns outside this module; it is only called for
   interactive `ask` syncs. `SyncOptions.onStart`/`onSuccess`/`onError` fire regardless of `notify`
   (used by `main.ts` to drive the status bar, independent of whether Notices are shown) — `onError`
@@ -152,7 +157,9 @@ Module responsibilities in `src/`, in dependency order:
   description styling compatible with the declared minimum Obsidian version to show an inline
   error instead of persisting a bad value. Changing "Auto-sync interval (minutes)" calls
   `plugin.applyAutoSyncInterval()`
-  immediately so the new interval takes effect without a plugin reload.
+  immediately so the new interval takes effect without a plugin reload. Account credentials and
+  iCalendar URLs are managed independently through SecretStorage.
+- **`onboardingModal.ts`** — the first-run and rerunnable four-step guided setup.
 - **`main.ts`** — the `Plugin` entry point. Registers commands (open today/tomorrow, sync now, sync
   next N days) and matching ribbon icons for all four actions. Owns `authDeps()`, the single place that builds the `AuthDeps`
   object (including `this.app.secretStorage`) passed into the auth/sync modules. `loadSettings` runs
@@ -179,6 +186,6 @@ Module responsibilities in `src/`, in dependency order:
   comments; general note content is never rewritten by sync.
 - Network/auth code (`googleAuth.ts`, `googleCalendar.ts`) takes `AuthDeps`, not the plugin or
   `App`, so it stays testable/usable independent of `main.ts`.
-- Secrets (client secret, access/refresh tokens) never go into `ObcaldianSettings` /
-  `data.json` — they go through `AuthDeps.secretStorage`. Only non-secret metadata
-  (`tokenExpiresAt`) lives in settings.
+- Secrets (client secret, access/refresh tokens, complete iCalendar URLs) never go into
+  `DailyCalSyncSettings` / `data.json` — they go through `AuthDeps.secretStorage`. Only non-secret
+  profile/feed metadata and token-expiry timestamps live in settings.

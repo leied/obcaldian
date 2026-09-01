@@ -30,9 +30,9 @@ class SyncPreviewModal extends Modal {
 		this.contentEl.createEl("p", {
 			text: `${counts.create} to create, ${counts.change} to change, ${counts.skip} to skip. Only marker-delimited calendar sections will be updated.`,
 		});
-		const changes = this.contentEl.createDiv({ cls: "obcaldian-sync-preview" });
+		const changes = this.contentEl.createDiv({ cls: "dailycalsync-sync-preview" });
 		for (const entry of this.plan.entries) {
-			const item = changes.createDiv({ cls: "obcaldian-sync-preview-item" });
+			const item = changes.createDiv({ cls: "dailycalsync-sync-preview-item" });
 			item.createEl("strong", { text: `${entry.operation.toUpperCase()}: ${entry.path}` });
 			if (entry.operation !== "skip") item.createEl("pre", { text: sectionDiff(entry) });
 		}

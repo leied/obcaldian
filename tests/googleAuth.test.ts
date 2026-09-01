@@ -10,11 +10,26 @@ import {
 } from "../src/googleAuth";
 import { DEFAULT_SETTINGS } from "../src/settings";
 
-function makeDeps(overrides: Partial<AuthDeps["settings"]> = {}): AuthDeps {
+const ACCOUNT_ID = "test-account";
+
+function makeDeps(tokenExpiresAt?: number): AuthDeps {
 	return {
-		settings: { ...DEFAULT_SETTINGS, ...overrides },
+		settings: {
+			...DEFAULT_SETTINGS,
+			googleAccounts: [{
+				id: ACCOUNT_ID,
+				name: "Test account",
+				clientId: "client",
+				projectId: "project",
+				tokenExpiresAt,
+				calendars: [],
+				calendarHealth: {},
+				calendarCaches: {},
+			}],
+		},
 		saveSettings: async () => {},
 		secretStorage: new SecretStorage(),
+		accountId: ACCOUNT_ID,
 	};
 }
 
@@ -26,6 +41,24 @@ describe("client secret storage", () => {
 		expect(getClientSecret(deps)).toBe("shh-its-a-secret");
 		expect(deps.settings).not.toHaveProperty("googleClientSecret");
 	});
+
+	it("isolates secrets between account profiles", () => {
+		const first = makeDeps();
+		first.settings.googleAccounts.push({
+			id: "second-account",
+			name: "Second",
+			clientId: "client-2",
+			projectId: "project-2",
+			calendars: [],
+			calendarHealth: {},
+			calendarCaches: {},
+		});
+		const second = { ...first, accountId: "second-account" };
+		setClientSecret(first, "first-secret");
+		setClientSecret(second, "second-secret");
+		expect(getClientSecret(first)).toBe("first-secret");
+		expect(getClientSecret(second)).toBe("second-secret");
+	});
 });
 
 describe("isConnected", () => {
@@ -34,12 +67,12 @@ describe("isConnected", () => {
 	});
 
 	it("is false with an expiry recorded but no refresh token in secret storage", () => {
-		expect(isConnected(makeDeps({ tokenExpiresAt: Date.now() + 3600_000 }))).toBe(false);
+		expect(isConnected(makeDeps(Date.now() + 3600_000))).toBe(false);
 	});
 
 	it("is true once both a refresh token and an expiry are present", () => {
-		const deps = makeDeps({ tokenExpiresAt: Date.now() + 3600_000 });
-		deps.secretStorage.setSecret("obcaldian-google-refresh-token", "refresh-token-value");
+		const deps = makeDeps(Date.now() + 3600_000);
+		deps.secretStorage.setSecret(`dailycalsync-google-${ACCOUNT_ID}-refresh-token`, "refresh-token-value");
 		expect(isConnected(deps)).toBe(true);
 	});
 });
@@ -50,7 +83,7 @@ describe("migrateLegacySecrets", () => {
 		const raw: Record<string, unknown> = { googleClientSecret: "legacy-secret" };
 		const migrated = migrateLegacySecrets(storage, raw);
 		expect(migrated).toBe(true);
-		expect(storage.getSecret("obcaldian-google-client-secret")).toBe("legacy-secret");
+		expect(storage.getSecret("dailycalsync-google-default-google-client-secret")).toBe("legacy-secret");
 		expect(raw).not.toHaveProperty("googleClientSecret");
 	});
 
@@ -65,8 +98,8 @@ describe("migrateLegacySecrets", () => {
 		};
 		const migrated = migrateLegacySecrets(storage, raw);
 		expect(migrated).toBe(true);
-		expect(storage.getSecret("obcaldian-google-access-token")).toBe("access-123");
-		expect(storage.getSecret("obcaldian-google-refresh-token")).toBe("refresh-456");
+		expect(storage.getSecret("dailycalsync-google-default-google-access-token")).toBe("access-123");
+		expect(storage.getSecret("dailycalsync-google-default-google-refresh-token")).toBe("refresh-456");
 		expect(raw.tokenExpiresAt).toBe(1_700_000_000_000);
 		expect(raw).not.toHaveProperty("tokens");
 	});

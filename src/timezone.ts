@@ -27,7 +27,7 @@ function offsetMinutesAt(epochMs: number, timeZone: string): number {
 }
 
 /** Resolves the wall-clock time in `timeZone` to the UTC instant it represents. */
-function zonedTime(
+export function zonedDateTime(
 	year: number,
 	month: number,
 	day: number,
@@ -69,7 +69,7 @@ export function zonedDayRange(
 	day: number,
 	timeZone: string
 ): { start: Date; end: Date } {
-	const start = zonedTime(year, month, day, 0, 0, 0, timeZone);
-	const end = zonedTime(year, month, day + 1, 0, 0, 0, timeZone);
+	const start = zonedDateTime(year, month, day, 0, 0, 0, timeZone);
+	const end = zonedDateTime(year, month, day + 1, 0, 0, 0, timeZone);
 	return { start, end };
 }

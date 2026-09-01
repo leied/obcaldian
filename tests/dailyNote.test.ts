@@ -15,7 +15,7 @@ import { FakeVault } from "./fakeVault";
 
 const DATE = moment("2026-07-22");
 const WORK_HEADING =
-	'<span class="obcaldian-calendar-label obcaldian-calendar-pexppc"></span> **Work**';
+	'<span class="dailycalsync-calendar-label dailycalsync-calendar-pexppc"></span> **Work**';
 
 describe("fileNameFor / notePathFor", () => {
 	it("names the file YYYYMMDD.md", () => {
@@ -123,7 +123,7 @@ describe("renderCalendarBlock", () => {
 		];
 		const block = renderCalendarBlock(calendars, new Map([["work", events]]));
 		expect(block).toBe(
-			`${WORK_HEADING}\n- [ ] 14:00 Planning[^obcaldian-1]\n\n[^obcaldian-1]: Quarterly roadmap review.`
+			`${WORK_HEADING}\n- [ ] 14:00 Planning[^dailycalsync-1]\n\n[^dailycalsync-1]: Quarterly roadmap review.`
 		);
 	});
 
@@ -155,7 +155,7 @@ describe("renderCalendarBlock", () => {
 		];
 		const block = renderCalendarBlock(calendars, new Map([["work", events]]));
 		expect(block).toBe(
-			`${WORK_HEADING}\n- [ ] Sync[^obcaldian-1]\n\n[^obcaldian-1]: Participants: Alice, Bob, carol@example.com`
+			`${WORK_HEADING}\n- [ ] Sync[^dailycalsync-1]\n\n[^dailycalsync-1]: Participants: Alice, Bob, carol@example.com`
 		);
 	});
 
@@ -183,12 +183,12 @@ describe("renderCalendarBlock", () => {
 		expect(block).toBe(
 			[
 				WORK_HEADING,
-				"- [ ] Kickoff[^obcaldian-1]",
-				"- [ ] Retro[^obcaldian-2]",
+				"- [ ] Kickoff[^dailycalsync-1]",
+				"- [ ] Retro[^dailycalsync-2]",
 				"",
-				"[^obcaldian-1]: Project kickoff.",
+				"[^dailycalsync-1]: Project kickoff.",
 				"    Participants: a@example.com, b@example.com, c@example.com",
-				"[^obcaldian-2]: Sprint retro.",
+				"[^dailycalsync-2]: Sprint retro.",
 			].join("\n")
 		);
 	});
@@ -222,10 +222,10 @@ describe("renderCalendarBlock", () => {
 		};
 		const key = multiDayEventKey("work", event.id!);
 		const previous = [
-			"<!-- obcaldian:calendar:start -->",
+			"<!-- dailycalsync:calendar:start -->",
 			`- [x] 09:00 Standup ${multiDayEventMarker(key)} follow up with Alice`,
 			"  - user-authored detail",
-			"<!-- obcaldian:calendar:end -->",
+			"<!-- dailycalsync:calendar:end -->",
 		].join("\n");
 		const block = renderCalendarBlock(
 			calendars,
@@ -243,14 +243,14 @@ describe("renderCalendarBlock", () => {
 	it("escapes event Markdown and rejects non-Google event links", () => {
 		const event: GoogleEvent = {
 			id: "unsafe-1",
-			summary: "[Injected](javascript:alert(1)) <!-- obcaldian:calendar:end -->",
+			summary: "[Injected](javascript:alert(1)) <!-- dailycalsync:calendar:end -->",
 			htmlLink: "javascript:alert(1)",
 			start: {},
 			end: {},
 		};
 		const block = renderCalendarBlock(calendars, new Map([["work", [event]]]));
 		expect(block).not.toContain("](javascript:");
-		expect(block).not.toContain("<!-- obcaldian:calendar:end -->");
+		expect(block).not.toContain("<!-- dailycalsync:calendar:end -->");
 		expect(block).toContain(multiDayEventMarker(multiDayEventKey("work", event.id!)));
 	});
 
@@ -292,7 +292,7 @@ describe("ensureDailyNote", () => {
 		expect(file.path).toBe("20260722.md");
 		const content = vault.contentOf("20260722.md");
 		expect(content).toContain("# 2026-07-22");
-		expect(content).toContain("<!-- obcaldian:calendar:start -->");
+		expect(content).toContain("<!-- dailycalsync:calendar:start -->");
 		expect(content).toContain('_(not yet synced');
 	});
 
@@ -327,15 +327,28 @@ describe("ensureDailyNote", () => {
 });
 
 describe("syncNoteCalendarSection", () => {
+	it("upgrades legacy marker blocks without losing surrounding content", async () => {
+		const vault = new FakeVault();
+		await vault.create(
+			"legacy.md",
+			"before\n<!-- obcaldian:calendar:start -->\nold\n<!-- obcaldian:calendar:end -->\nafter"
+		);
+		const file = vault.getAbstractFileByPath("legacy.md");
+		await syncNoteCalendarSection(vault as never, file as never, "new", false);
+		expect(vault.contentOf("legacy.md")).toBe(
+			"before\n<!-- dailycalsync:calendar:start -->\nnew\n<!-- dailycalsync:calendar:end -->\nafter"
+		);
+	});
+
 	it("replaces only the content between the markers", async () => {
 		const vault = new FakeVault();
 		const file = await vault.create(
 			"20260722.md",
 			[
 				"# Daily",
-				"<!-- obcaldian:calendar:start -->",
+				"<!-- dailycalsync:calendar:start -->",
 				"_(not yet synced)_",
-				"<!-- obcaldian:calendar:end -->",
+				"<!-- dailycalsync:calendar:end -->",
 				"## Notes",
 				"user text here",
 			].join("\n")
@@ -347,10 +360,10 @@ describe("syncNoteCalendarSection", () => {
 		expect(vault.contentOf("20260722.md")).toBe(
 			[
 				"# Daily",
-				"<!-- obcaldian:calendar:start -->",
+				"<!-- dailycalsync:calendar:start -->",
 				"**Work**",
 				"- [ ] 09:00 Standup",
-				"<!-- obcaldian:calendar:end -->",
+				"<!-- dailycalsync:calendar:end -->",
 				"## Notes",
 				"user text here",
 			].join("\n")
@@ -372,10 +385,10 @@ describe("syncNoteCalendarSection", () => {
 		const file = await vault.create(
 			"20260722.md",
 			[
-				"<!-- obcaldian:calendar:end -->",
-				"<!-- obcaldian:calendar:start -->",
+				"<!-- dailycalsync:calendar:end -->",
+				"<!-- dailycalsync:calendar:start -->",
 				"old block",
-				"<!-- obcaldian:calendar:end -->",
+				"<!-- dailycalsync:calendar:end -->",
 			].join("\n")
 		);
 
@@ -383,7 +396,7 @@ describe("syncNoteCalendarSection", () => {
 
 		expect(ok).toBe(true);
 		expect(vault.contentOf("20260722.md")).toContain(
-			"<!-- obcaldian:calendar:start -->\nnew block\n<!-- obcaldian:calendar:end -->"
+			"<!-- dailycalsync:calendar:start -->\nnew block\n<!-- dailycalsync:calendar:end -->"
 		);
 	});
 });

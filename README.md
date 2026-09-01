@@ -1,7 +1,7 @@
-# Obcaldian
+# DailyCalSync
 
 An Obsidian plugin (desktop only) that generates daily notes from your own template and keeps a
-plugin-managed section of each note synced with selected Google Calendars.
+plugin-managed section synced with multiple Google accounts and read-only Secret iCalendar feeds.
 
 The plugin runs locally without analytics, telemetry, a publisher proxy, or a hosted backend. See
 [Privacy and data handling](PRIVACY.md) and the [security policy](SECURITY.md).
@@ -9,7 +9,7 @@ The plugin runs locally without analytics, telemetry, a publisher proxy, or a ho
 ## Features
 
 - Creates a daily note from a template you write, on demand or via ribbon icon/commands.
-- Keeps a single marker-delimited section of that note in sync with your Google Calendar events —
+- Keeps a single marker-delimited section of that note in sync with calendar events —
   the rest of the note is never touched, so your own edits are safe.
 - Each event can carry a footnote with its description and, once there are three or more attendees,
   a participant list.
@@ -28,13 +28,20 @@ The plugin runs locally without analytics, telemetry, a publisher proxy, or a ho
 - Privacy-aware filters and rendering controls for event details, visibility, availability, event
   types, time format, ordering, and calendar colors.
 - Incremental Google sync tokens and a local event cache reduce background API traffic.
+- Multiple Google profiles with isolated OAuth credentials, tokens, calendar selections, caches,
+  health state, disconnect, and revocation boundaries.
+- Read-only Secret iCalendar feeds whose complete HTTPS URLs stay in Obsidian SecretStorage.
+- A first-run guided setup and a persistent setup overview showing which pieces still need work.
 
 ## Setup
 
 ### 1. Install and enable
 
 Copy (or build, see below) `main.js`, `manifest.json`, and `styles.css` into your vault's
-`.obsidian/plugins/obcaldian/` folder, then enable **Obcaldian** in Settings → Community plugins.
+`.obsidian/plugins/dailycalsync/` folder, then enable **DailyCalSync** in Settings → Community plugins.
+
+On first launch, DailyCalSync opens a four-step setup guide covering privacy, daily-note settings,
+calendar sources, and readiness. You can run it again from the top of the settings page.
 
 ### 2. Write a template
 
@@ -57,12 +64,12 @@ Example template:
 ## Notes
 ```
 
-If `{calendar}` is missing, Obcaldian shows a warning and does not create the note. This avoids
+If `{calendar}` is missing, DailyCalSync shows a warning and does not create the note. This avoids
 creating a daily note that the plugin can never safely synchronize.
 
 ### 3. Configure the plugin
 
-In Settings → Obcaldian:
+In Settings → DailyCalSync:
 
 - **Daily note folder** / **Template file** — where notes go and which template to use.
 - **Timezone** — defaults to your system timezone; only change it if your calendar should be
@@ -71,7 +78,7 @@ In Settings → Obcaldian:
 - **Reuse core Daily Notes settings** — optionally copy its folder, template, and filename format.
 - **Missing notes** — choose whether range sync creates notes or updates existing notes only.
 
-### 4. Connect a Google account
+### 4. Connect one or more Google accounts
 
 Google requires your own OAuth client — this plugin doesn't ship a shared one, so you create a
 small, free "app" in Google Cloud that only you use.
@@ -81,7 +88,7 @@ small, free "app" in Google Cloud that only you use.
 1. Go to the [Google Cloud Console](https://console.cloud.google.com/) and sign in with the Google
    account whose calendars you want to sync.
 2. Click the project dropdown (top left, next to "Google Cloud") → **New Project**.
-3. Give it any name (e.g. "Obcaldian") and click **Create**. No billing account is required for
+3. Give it any name (e.g. "DailyCalSync") and click **Create**. No billing account is required for
    this API.
 4. Make sure the new project is selected in the project dropdown before continuing.
 
@@ -108,7 +115,7 @@ small, free "app" in Google Cloud that only you use.
    move to "In production." That's not worth it for a personal, single-user app.
 
    > **Trade-off of staying in Testing:** Google expires refresh tokens after 7 days for apps in
-   > this status, so Obcaldian's sync will eventually fail with a "not connected"-style error and
+   > this status, so DailyCalSync's sync will eventually fail with a "not connected"-style error and
    > you'll need to click **Connect** again in the plugin settings — a few seconds' work. If you
    > have a Google Workspace account (a work/school domain, not `@gmail.com`), you can instead set
    > the user type to **Internal** in step 2 above; internal apps skip verification and the 7-day
@@ -121,18 +128,19 @@ small, free "app" in Google Cloud that only you use.
 3. Click **Create**, then use **Download JSON** from the credentials list. Keep this file private.
 
    Desktop-app clients don't need a redirect URI configured in the console — Google allows any
-   loopback address automatically. Obcaldian's local callback server listens on
+   loopback address automatically. DailyCalSync's local callback server listens on
    `http://127.0.0.1:42813/callback` and requests only the read-only Calendar scope.
 
 #### 4e. Connect in Obsidian
 
-1. In Settings → Obcaldian, click **Import JSON** and select the downloaded desktop credentials.
-   Obcaldian extracts the client/project identity and secret, then discards the source file and
+1. In Settings → DailyCalSync, click **Add Google account**. Give the profile a useful name, then
+   click **Import JSON** and select the downloaded desktop credentials.
+   DailyCalSync extracts the client/project identity and secret, then discards the source file and
    path. Manual Client ID/secret fields remain available as a fallback.
 2. Click **Connect**. This opens your system browser to Google's consent screen; approve access
    (you'll hit the "unverified app" warning here if you published the app per 4c, or you'll just
    sign in directly if it's still in Testing and you're the test user).
-3. Google redirects back to the local callback server, which shows a plain "Obcaldian connected"
+3. Google redirects back to the local callback server, which shows a plain "DailyCalSync connected"
    page — you can close that browser tab and return to Obsidian.
 4. Click **Refresh** under Calendars, then toggle on the calendars you want synced and choose how
    each one's events should be added (`- [ ]` checkbox or `-` bullet).
@@ -140,10 +148,27 @@ small, free "app" in Google Cloud that only you use.
 The client secret and resulting OAuth tokens are stored in Obsidian's secret storage, not
 in your vault's `data.json`.
 
+Repeat the process for each Google account. Every profile owns its credentials, tokens, calendars,
+cache, and health state. Removing a profile revokes its refresh token when possible and clears that
+profile's local secrets without affecting any other profile.
+
+### 5. Add a Secret iCalendar feed
+
+Under **Secret iCalendar feeds**, click **Add iCal feed**, name it, and paste its private HTTPS
+`.ics` URL. The URL is stored only in Obsidian SecretStorage and fetched directly from the host you
+selected. It is never included in diagnostics or plugin `data.json`.
+
+This mode is read-only and does not need OAuth. DailyCalSync supports all-day and timed VEVENTs,
+folded/escaped text, `DURATION`, `EXDATE`, moved recurrence overrides, and bounded daily, weekly,
+monthly, and yearly `RRULE` expansion. Feeds must use HTTPS, are limited to 5 MB, and may expand to
+at most 5,000 occurrences in one sync range. Treat a Secret iCal URL like a password: anyone who
+has it can usually read that calendar.
+
 ## Commands
 
 - **Open today's daily note** / **Open tomorrow's daily note**
-- **Sync Google calendars now** — syncs today plus the configured days ahead.
+- **Sync calendars now** — syncs every enabled Google and iCalendar source for today plus the
+  configured days ahead.
 - **Sync upcoming days...** — prompts for a day count and syncs that range once, without changing
   your default.
 - **Sync calendar date range...** — supports past/future dates, preview, and existing-only mode.
@@ -160,13 +185,13 @@ background syncs stay quiet and share the same coordinator so they cannot overla
 
 ## Multi-day events
 
-Google returns an event whenever it overlaps the day being queried. Obcaldian renders an all-day
+DailyCalSync renders an all-day
 event spanning several dates—and a timed event crossing midnight—in every overlapping daily note,
 annotated as `(Day 1/3)`, `(Day 2/3)`, and so on. The span is calculated in the configured timezone;
 Google's all-day end date is correctly treated as exclusive.
 
-Multi-day checkbox lines contain an invisible event marker. On the next sync, Obcaldian uses that
-marker to preserve the checkbox state and offers three behaviors under Settings → Obcaldian → Sync:
+Multi-day checkbox lines contain an invisible event marker. On the next sync, DailyCalSync uses that
+marker to preserve the checkbox state and offers three behaviors under Settings → DailyCalSync → Sync:
 
 - **Keep each day independent** — preserve only the checkbox state already present in each note.
 - **Ask during manual sync** — when a checked day has later occurrences, ask whether that day and
@@ -177,9 +202,9 @@ marker to preserve the checkbox state and offers three behaviors under Settings 
 
 ### What happens to dates that have not been synced?
 
-Accepting the prompt—or selecting automatic propagation—stores a small rule keyed by the Google
+Accepting the prompt—or selecting automatic propagation—stores a small rule keyed by the source
 calendar and event ID. For example, checking Day 2 stores “completed from Day 2 through the event's
-end.” Obcaldian does not create every future note immediately. Instead, when Day 3 or Day 4 later
+end.” DailyCalSync does not create every future note immediately. Instead, when Day 3 or Day 4 later
 enters a sync range, its occurrence is rendered checked from the stored rule.
 
 Background checks never open a modal. In **Ask** mode they preserve checkbox states already on disk
@@ -201,7 +226,7 @@ non-empty lines indented beneath the event, is treated as a user annotation and 
 syncs. For example:
 
 ```markdown
-- [x] 09:00 Standup <!-- obcaldian:event:... --> send recap
+- [x] 09:00 Standup <!-- dailycalsync:event:... --> send recap
   - Decision: ship on Friday
 ```
 
@@ -215,9 +240,10 @@ Calendar requests and every target note are preflighted before a write. The plan
 after preview; if a note changed meanwhile, sync stops safely. Vault failures trigger rollback of
 earlier writes. Transient quota/server errors use bounded retries with `Retry-After` support.
 
-The first sync builds a per-calendar event cache and stores Google's incremental token. Later syncs
-request changes only; an expired token automatically triggers a full rebuild. Cache contents stay
-local in Obsidian's plugin data and can include event metadata.
+The first Google sync builds a per-calendar event cache and stores Google's incremental token.
+Later syncs request changes only; an expired token automatically triggers a full rebuild. Secret
+iCalendar feeds are fetched as complete read-only documents and their parsed range is cached.
+Cache contents stay local in Obsidian's plugin data and can include event metadata.
 
 ## Development
 

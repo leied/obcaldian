@@ -42,10 +42,11 @@ describe("loadSettingsData", () => {
 		});
 		expect(loaded.changed).toBe(true);
 		expect(loaded.settings.schemaVersion).toBe(SETTINGS_SCHEMA_VERSION);
-		expect(loaded.settings.googleClientId).toBe("client");
+		expect(loaded.settings.googleAccounts[0].clientId).toBe("client");
 		expect(loaded.settings.syncDaysAhead).toBe(DEFAULT_SETTINGS.syncDaysAhead);
-		expect(loaded.settings.calendars).toHaveLength(1);
-		expect(loaded.settings.calendars[0].addAs).toBe("checkbox");
+		expect(loaded.settings.googleAccounts[0].calendars).toHaveLength(1);
+		expect(loaded.settings.googleAccounts[0].calendars[0].addAs).toBe("checkbox");
+		expect(loaded.settings.onboardingComplete).toBe(true);
 		expect(loaded.settings.multiDayCompletionRules).toEqual({
 			good: { completedFrom: "2026-01-01", eventEnd: "2026-01-02" },
 		});

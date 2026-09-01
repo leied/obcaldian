@@ -1,7 +1,7 @@
 /**
  * Minimal runtime stand-in for the "obsidian" package, which ships types only
  * (no JS) since the real implementation lives inside the Obsidian app.
- * vitest.config.ts aliases "obsidian" to this file for tests.
+ * vitest.config.mts aliases "obsidian" to this file for tests.
  */
 
 export function normalizePath(path: string): string {

@@ -94,13 +94,13 @@ export function eventOccurrenceKey(calendarId: string, event: GoogleEvent): stri
 export function multiDayEventMarker(eventKey: string): string {
 	// Escape hyphens too, keeping the HTML comment body valid even for IDs containing "--".
 	const encoded = encodeURIComponent(eventKey).replace(/-/g, "%2D");
-	return `<!-- obcaldian:event:${encoded} -->`;
+	return `<!-- dailycalsync:event:${encoded} -->`;
 }
 
 export const eventMarker = multiDayEventMarker;
 
 export function eventKeyFromMarkerLine(line: string): string | null {
-	const match = line.match(/<!-- obcaldian:event:([^\s]+) -->/);
+	const match = line.match(/<!-- (?:dailycalsync|obcaldian):event:([^\s]+) -->/);
 	if (!match) return null;
 	try {
 		return decodeURIComponent(match[1]);
@@ -111,8 +111,9 @@ export function eventKeyFromMarkerLine(line: string): string | null {
 
 /** Reads a checkbox state only from the event's own invisible marker line. */
 export function isMultiDayEventChecked(content: string, eventKey: string): boolean {
-	const marker = multiDayEventMarker(eventKey);
+	const encoded = encodeURIComponent(eventKey).replace(/-/g, "%2D");
+	const markers = [multiDayEventMarker(eventKey), `<!-- obcaldian:event:${encoded} -->`];
 	return content
 		.split("\n")
-		.some((line) => line.includes(marker) && /^\s*- \[[xX]\]/.test(line));
+		.some((line) => markers.some((marker) => line.includes(marker)) && /^\s*- \[[xX]\]/.test(line));
 }

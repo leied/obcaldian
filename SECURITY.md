@@ -14,7 +14,8 @@ to establish a private contact channel. Do not disclose exploit details in that 
 
 - OAuth client secrets and access/refresh tokens are stored using Obsidian SecretStorage.
 - Calendar data is written only to the user's vault and plugin-local persisted data.
-- Production network requests are restricted in code to Google OAuth and Calendar hosts.
+- Fixed production network requests are restricted to Google OAuth and Calendar hosts. User-added
+  Secret iCalendar feeds may contact their explicitly configured HTTPS hosts.
 - The plugin has no analytics, telemetry, publisher proxy, or publisher-operated backend.
 - The loopback OAuth callback listens only on `127.0.0.1` and is used only while connecting.
 

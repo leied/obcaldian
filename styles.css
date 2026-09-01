@@ -1,4 +1,4 @@
-.obcaldian-calendar-row {
+.dailycalsync-calendar-row {
 	display: flex;
 	align-items: center;
 	justify-content: space-between;
@@ -7,31 +7,31 @@
 	border-bottom: 1px solid var(--background-modifier-border);
 }
 
-.obcaldian-calendar-row-name {
+.dailycalsync-calendar-row-name {
 	flex: 1;
 	overflow: hidden;
 	text-overflow: ellipsis;
 	white-space: nowrap;
 }
 
-.obcaldian-status {
+.dailycalsync-status {
 	font-size: var(--font-ui-smaller);
 	color: var(--text-muted);
 }
 
-.obcaldian-status-bar-item {
+.dailycalsync-status-bar-item {
 	cursor: pointer;
 }
 
-.obcaldian-setting-error {
+.dailycalsync-setting-error {
 	color: var(--text-error);
 }
 
-.obcaldian-file-input {
+.dailycalsync-file-input {
 	display: none;
 }
 
-.obcaldian-calendar-label {
+.dailycalsync-calendar-label {
 	display: inline-block;
 	width: 0.65em;
 	height: 0.65em;
@@ -41,48 +41,60 @@
 	background: var(--interactive-accent);
 }
 
-.obcaldian-calendar-color-1,
-.obcaldian-calendar-color-8,
-.obcaldian-calendar-color-15,
-.obcaldian-calendar-color-22 { background: #7986cb; }
-.obcaldian-calendar-color-2,
-.obcaldian-calendar-color-9,
-.obcaldian-calendar-color-16,
-.obcaldian-calendar-color-23 { background: #33b679; }
-.obcaldian-calendar-color-3,
-.obcaldian-calendar-color-10,
-.obcaldian-calendar-color-17,
-.obcaldian-calendar-color-24 { background: #8e24aa; }
-.obcaldian-calendar-color-4,
-.obcaldian-calendar-color-11,
-.obcaldian-calendar-color-18 { background: #e67c73; }
-.obcaldian-calendar-color-5,
-.obcaldian-calendar-color-12,
-.obcaldian-calendar-color-19 { background: #f6bf26; }
-.obcaldian-calendar-color-6,
-.obcaldian-calendar-color-13,
-.obcaldian-calendar-color-20 { background: #f4511e; }
-.obcaldian-calendar-color-7,
-.obcaldian-calendar-color-14,
-.obcaldian-calendar-color-21 { background: #039be5; }
+.dailycalsync-calendar-color-1,
+.dailycalsync-calendar-color-8,
+.dailycalsync-calendar-color-15,
+.dailycalsync-calendar-color-22 { background: #7986cb; }
+.dailycalsync-calendar-color-2,
+.dailycalsync-calendar-color-9,
+.dailycalsync-calendar-color-16,
+.dailycalsync-calendar-color-23 { background: #33b679; }
+.dailycalsync-calendar-color-3,
+.dailycalsync-calendar-color-10,
+.dailycalsync-calendar-color-17,
+.dailycalsync-calendar-color-24 { background: #8e24aa; }
+.dailycalsync-calendar-color-4,
+.dailycalsync-calendar-color-11,
+.dailycalsync-calendar-color-18 { background: #e67c73; }
+.dailycalsync-calendar-color-5,
+.dailycalsync-calendar-color-12,
+.dailycalsync-calendar-color-19 { background: #f6bf26; }
+.dailycalsync-calendar-color-6,
+.dailycalsync-calendar-color-13,
+.dailycalsync-calendar-color-20 { background: #f4511e; }
+.dailycalsync-calendar-color-7,
+.dailycalsync-calendar-color-14,
+.dailycalsync-calendar-color-21 { background: #039be5; }
 
-.obcaldian-sync-preview {
+.dailycalsync-sync-preview {
 	max-height: 50vh;
 	overflow: auto;
 	border: 1px solid var(--background-modifier-border);
 	border-radius: var(--radius-s);
 }
 
-.obcaldian-sync-preview-item {
+.dailycalsync-sync-preview-item {
 	padding: 0.75em;
 	border-bottom: 1px solid var(--background-modifier-border);
 }
 
-.obcaldian-sync-preview-item:last-child {
+.dailycalsync-sync-preview-item:last-child {
 	border-bottom: 0;
 }
 
-.obcaldian-sync-preview-item pre {
+.dailycalsync-sync-preview-item pre {
 	white-space: pre-wrap;
 	color: var(--text-muted);
+}
+
+.dailycalsync-onboarding {
+	width: min(42rem, 90vw);
+}
+
+.dailycalsync-onboarding h2 {
+	margin-top: 0.5rem;
+}
+
+.dailycalsync-onboarding ul {
+	padding-inline-start: 1.5rem;
 }

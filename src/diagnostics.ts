@@ -1,6 +1,6 @@
 import { Platform, apiVersion } from "obsidian";
 import { ALLOWED_OUTBOUND_HOSTS } from "./network";
-import type { ObcaldianSettings } from "./settings";
+import type { DailyCalSyncSettings } from "./settings";
 
 function platformName(): string {
 	if (Platform.isMacOS) return "macOS";
@@ -11,25 +11,32 @@ function platformName(): string {
 
 export function buildRedactedDiagnostics(
 	pluginVersion: string,
-	settings: ObcaldianSettings
+	settings: DailyCalSyncSettings
 ): string {
-	const enabledCalendars = settings.calendars.filter((calendar) => calendar.enabled);
+	const enabledGoogleCalendars = settings.googleAccounts.reduce(
+		(total, account) => total + account.calendars.filter((calendar) => calendar.enabled).length,
+		0
+	);
+	const enabledICalCalendars = settings.iCalCalendars.filter((calendar) => calendar.enabled).length;
 	const failures = settings.recentFailures.map(
 		(failure) =>
 			`- ${failure.category} at ${new Date(failure.at).toISOString()} — ${failure.message}`
 	);
 	return [
-		"Obcaldian diagnostics (redacted)",
+		"DailyCalSync diagnostics (redacted)",
 		`Plugin version: ${pluginVersion}`,
 		`Obsidian API version: ${apiVersion}`,
 		`Platform: ${platformName()}`,
 		`Timezone: ${settings.timezone}`,
-		`Enabled calendars: ${enabledCalendars.length}`,
+		`Google account profiles: ${settings.googleAccounts.length}`,
+		`Enabled Google calendars: ${enabledGoogleCalendars}`,
+		`Enabled iCalendar feeds: ${enabledICalCalendars}`,
 		`Daily note folder: ${settings.dailyNoteFolder || "(vault root)"}`,
 		`Template path: ${settings.templatePath || "(not configured)"}`,
 		`Filename format: ${settings.dailyNoteFormat}`,
 		`Last successful sync: ${settings.lastSuccessfulSyncAt ? new Date(settings.lastSuccessfulSyncAt).toISOString() : "never"}`,
-		`Network hosts: ${[...ALLOWED_OUTBOUND_HOSTS].sort().join(", ")}, 127.0.0.1`,
+		`Fixed network hosts: ${[...ALLOWED_OUTBOUND_HOSTS].sort().join(", ")}, 127.0.0.1`,
+		"User-configured iCalendar hosts: redacted",
 		"Recent categorized failures:",
 		...(failures.length ? failures : ["- None recorded"]),
 		"",
@@ -39,7 +46,7 @@ export function buildRedactedDiagnostics(
 
 export async function copyRedactedDiagnostics(
 	pluginVersion: string,
-	settings: ObcaldianSettings
+	settings: DailyCalSyncSettings
 ): Promise<void> {
 	await window.navigator.clipboard.writeText(
 		buildRedactedDiagnostics(pluginVersion, settings)

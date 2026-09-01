@@ -73,6 +73,11 @@ for (const path of sourceFiles.filter((path) => path !== "src/network.ts")) {
 	}
 }
 
+const googleAuthSource = readFileSync("src/googleAuth.ts", "utf8");
+if (/import\s*\(\s*["']node:http["']\s*\)/.test(googleAuthSource)) {
+	fail("googleAuth.ts must statically import node:http so Obsidian does not treat it as a web module.");
+}
+
 const allowedSourceHosts = new Set([
 	"accounts.google.com",
 	"oauth2.googleapis.com",
@@ -89,5 +94,5 @@ for (const path of sourceFiles) {
 }
 
 if (!process.exitCode) {
-	console.log(`Release files are valid for Obcaldian ${manifest.version}.`);
+	console.log(`Release files are valid for DailyCalSync ${manifest.version}.`);
 }

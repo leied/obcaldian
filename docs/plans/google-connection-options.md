@@ -1,6 +1,6 @@
 # Plan: Simpler Google Calendar connections
 
-Status: user-owned OAuth path implemented 2026-08-31; optional Secret iCal remains an evaluation.
+Status: user-owned multi-profile OAuth and optional Secret iCalendar paths implemented 2026-08-31.
 
 ## App Password decision
 
@@ -25,7 +25,7 @@ Official references:
 
 ## Project constraints
 
-- No Obcaldian-operated backend, proxy, token broker, or hosted callback.
+- No DailyCalSync-operated backend, proxy, token broker, or hosted callback.
 - No publisher-owned OAuth client shared by all users.
 - Calendar contents and OAuth tokens must travel only between the user's machine and Google.
 - Users should not need to trust the publisher with an authorization boundary that can be avoided.
@@ -42,7 +42,7 @@ publisher-managed OAuth is out of scope.
 ### 1. User-owned OAuth with credentials JSON import
 
 Keep user-owned Google Cloud credentials as the full-featured connection method, but remove most of
-the error-prone setup inside Obcaldian:
+the error-prone setup inside DailyCalSync:
 
 1. Add an **Import Google credentials JSON** control accepting Google's downloaded desktop-client
    file.
@@ -57,7 +57,7 @@ the error-prone setup inside Obcaldian:
 
 Acceptance criteria:
 
-- Obcaldian operates no server and receives no token, calendar content, or connection metadata.
+- DailyCalSync operates no server and receives no token, calendar content, or connection metadata.
 - Every user controls their own Google project, OAuth client, quota, consent configuration, and
   revocation boundary.
 - Setup requires downloading and selecting one credentials file rather than copying individual
@@ -71,13 +71,14 @@ Acceptance criteria:
 - CI checks the network-destination allowlist and release provenance so unexpected outbound hosts
   cannot be added unnoticed.
 
-### 2. Optional Secret iCal URL connection
+### 2. Secret iCal URL connection
 
-Investigate a separate read-only feed mode using Google's **Secret address in iCal format**. This is
+The implemented read-only feed mode accepts Google's **Secret address in iCal format** and other
+standards-compatible HTTPS feeds. This is
 not an App Password and is not equivalent to account access. It is a bearer-secret URL for one
 calendar at a time.
 
-Implementation work:
+Implemented safeguards:
 
 1. Store each URL in SecretStorage and show only a redacted identifier in settings.
 2. Fetch and parse ICS, including recurrence rules, exceptions, all-day values, timezones, and

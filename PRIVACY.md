@@ -1,6 +1,6 @@
 # Privacy and data handling
 
-Obcaldian runs locally inside Obsidian. It does not contain analytics or telemetry and does not
+DailyCalSync runs locally inside Obsidian. It does not contain analytics or telemetry and does not
 send data to the plugin publisher.
 
 ## Data read from Google
@@ -18,6 +18,8 @@ times, descriptions, locations, meeting links, visibility, availability, and att
 - The Google client secret and OAuth access/refresh tokens are stored in Obsidian SecretStorage.
 - Imported Google credentials JSON is parsed once. Its source path and original contents are not
   retained.
+- Secret iCalendar URLs are stored in Obsidian SecretStorage. Parsed feed events may be cached in
+  plugin data and rendered into daily notes just like Google events.
 
 Anyone who can read the vault or its backups can read event data rendered into notes. Privacy
 settings can redact private events and omit attendee email addresses before data is persisted.
@@ -30,11 +32,16 @@ The production allowlist permits HTTPS requests only to:
 - `oauth2.googleapis.com` for OAuth token exchange and revocation;
 - `www.googleapis.com` for Google Calendar API requests.
 
+Each user-configured Secret iCalendar feed is fetched directly from its HTTPS host. Those hosts
+are chosen by the user, are not publisher-controlled, and are redacted from diagnostics because a
+feed host or URL can itself be sensitive.
+
 The OAuth redirect returns to a temporary HTTP server bound to `127.0.0.1` on the user's computer.
 There are no publisher-controlled endpoints.
 
 ## Disconnecting and deletion
 
-Disconnecting clears locally stored OAuth tokens. Existing Markdown already written to the vault
+Disconnecting a Google profile clears its locally stored OAuth tokens. Removing an iCalendar feed
+clears its SecretStorage URL and cache. Existing Markdown already written to the vault
 is not removed. Users can delete managed calendar sections, plugin settings/cache data, and the
 plugin itself through their normal Obsidian and filesystem controls.

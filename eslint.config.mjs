@@ -9,7 +9,7 @@ export default defineConfig([
 			"sample-app/**",
 			"scripts/**",
 			"tests/**",
-			"vitest.config.ts",
+			"vitest.config.mts",
 		],
 	},
 	...obsidianmd.configs.recommended,

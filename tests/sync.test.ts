@@ -10,6 +10,7 @@ import {
 } from "../src/googleCalendar";
 import { DEFAULT_SETTINGS } from "../src/settings";
 import { multiDayEventKey, multiDayEventMarker } from "../src/multiDay";
+import { refreshICalCalendar } from "../src/ical";
 import {
 	autoSyncTick,
 	syncDateRange,
@@ -19,18 +20,32 @@ import {
 } from "../src/sync";
 import { FakeVault } from "./fakeVault";
 
+const ACCOUNT_ID = "account-one";
+const SOURCE_ID = `google:${ACCOUNT_ID}:work`;
+
 vi.mock("../src/googleCalendar", () => ({
 	refreshCalendarCache: vi.fn(async () => []),
 	cachedEventsForDay: vi.fn((events: GoogleEvent[]) => events),
 	calendarCacheEvents: vi.fn(() => []),
 }));
 
+vi.mock("../src/ical", () => ({
+	refreshICalCalendar: vi.fn(async () => []),
+}));
+
 function baseDeps(): AuthDeps {
 	return {
 		settings: {
 			...DEFAULT_SETTINGS,
-			calendarHealth: {},
-			calendarCaches: {},
+			googleAccounts: [{
+				id: ACCOUNT_ID,
+				name: "Google account",
+				clientId: "client",
+				projectId: "project",
+				calendars: [{ id: "work", summary: "Work", enabled: true, addAs: "checkbox" }],
+				calendarHealth: {},
+				calendarCaches: {},
+			}],
 			multiDayCompletionRules: {},
 			rendering: { ...DEFAULT_SETTINGS.rendering },
 		},
@@ -41,10 +56,9 @@ function baseDeps(): AuthDeps {
 
 function connectedDeps(): AuthDeps {
 	const deps = baseDeps();
-	deps.settings.tokenExpiresAt = Date.now() + 3600_000;
-	deps.settings.calendars = [{ id: "work", summary: "Work", enabled: true, addAs: "checkbox" }];
+	deps.settings.googleAccounts[0].tokenExpiresAt = Date.now() + 3600_000;
 	deps.settings.templatePath = "Templates/Daily.md";
-	deps.secretStorage.setSecret("obcaldian-google-refresh-token", "refresh-token");
+	deps.secretStorage.setSecret(`dailycalsync-google-${ACCOUNT_ID}-refresh-token`, "refresh-token");
 	return deps;
 }
 
@@ -53,13 +67,56 @@ beforeEach(() => {
 	vi.mocked(refreshCalendarCache).mockReset().mockResolvedValue([]);
 	vi.mocked(cachedEventsForDay).mockImplementation((events) => [...events]);
 	vi.mocked(calendarCacheEvents).mockReset().mockReturnValue([]);
+	vi.mocked(refreshICalCalendar).mockReset().mockResolvedValue([]);
 });
 
 describe("syncRange notifications", () => {
+	it("syncs isolated calendars from multiple connected Google profiles", async () => {
+		const vault = new FakeVault();
+		await vault.create("Templates/Daily.md", "{{date}}\n{calendar}\n");
+		const deps = connectedDeps();
+		deps.settings.googleAccounts.push({
+			id: "account-two",
+			name: "Second account",
+			clientId: "client-2",
+			projectId: "project-2",
+			tokenExpiresAt: Date.now() + 3600_000,
+			calendars: [{ id: "personal", summary: "Personal", enabled: true, addAs: "bullet" }],
+			calendarHealth: {},
+			calendarCaches: {},
+		});
+		deps.secretStorage.setSecret("dailycalsync-google-account-two-refresh-token", "refresh-two");
+		vi.mocked(refreshCalendarCache)
+			.mockResolvedValueOnce([{ id: "work-event", summary: "Work event", start: { date: moment().format("YYYY-MM-DD") }, end: { date: moment().add(1, "day").format("YYYY-MM-DD") } }])
+			.mockResolvedValueOnce([{ id: "personal-event", summary: "Personal event", start: { date: moment().format("YYYY-MM-DD") }, end: { date: moment().add(1, "day").format("YYYY-MM-DD") } }]);
+
+		await syncRange(vault as never, deps, 0, { notify: false });
+
+		expect(vi.mocked(refreshCalendarCache).mock.calls.map(([auth]) => auth.accountId)).toEqual([ACCOUNT_ID, "account-two"]);
+		const content = vault.contentOf(`${moment().format("YYYYMMDD")}.md`);
+		expect(content).toContain("**Work**");
+		expect(content).toContain("**Personal**");
+	});
+
+	it("syncs an iCalendar feed without requiring Google OAuth", async () => {
+		const vault = new FakeVault();
+		await vault.create("Templates/Daily.md", "{{date}}\n{calendar}\n");
+		const deps = baseDeps();
+		deps.settings.googleAccounts = [];
+		deps.settings.iCalCalendars = [{ id: "ical-one", summary: "Shared", enabled: true, addAs: "bullet" }];
+		deps.settings.templatePath = "Templates/Daily.md";
+		vi.mocked(refreshICalCalendar).mockResolvedValue([{ id: "ical-event", summary: "Read only", start: { date: moment().format("YYYY-MM-DD") }, end: { date: moment().add(1, "day").format("YYYY-MM-DD") } }]);
+
+		await syncRange(vault as never, deps, 0, { notify: false });
+
+		expect(vault.contentOf(`${moment().format("YYYYMMDD")}.md`)).toContain("**Shared**");
+		expect(vault.contentOf(`${moment().format("YYYYMMDD")}.md`)).toContain("- Read only");
+	});
+
 	it("shows a Notice when not connected, by default", async () => {
 		await syncRange(new FakeVault() as never, baseDeps(), 0);
 		expect(Notice.instances.map((n) => n.message)).toEqual([
-			"Obcaldian: connect your Google account first.",
+			'DailyCalSync: connect the Google account "Google account" first.',
 		]);
 	});
 
@@ -72,7 +129,7 @@ describe("syncRange notifications", () => {
 		const vault = new FakeVault();
 		await vault.create("Templates/Daily.md", "{{date}}\n{calendar}\n");
 		await syncRange(vault as never, connectedDeps(), 0);
-		expect(Notice.instances.map((n) => n.message)).toEqual(["Obcaldian: synced 1 day."]);
+		expect(Notice.instances.map((n) => n.message)).toEqual(["DailyCalSync: synced 1 day."]);
 	});
 
 	it("suppresses the success Notice when notify is false, but still writes the note", async () => {
@@ -81,7 +138,7 @@ describe("syncRange notifications", () => {
 		await syncRange(vault as never, connectedDeps(), 0, { notify: false });
 		expect(Notice.instances).toHaveLength(0);
 		const todayPath = `${moment().format("YYYYMMDD")}.md`;
-		expect(vault.contentOf(todayPath)).toContain("<!-- obcaldian:calendar:start -->");
+		expect(vault.contentOf(todayPath)).toContain("<!-- dailycalsync:calendar:start -->");
 	});
 });
 
@@ -93,13 +150,13 @@ describe("syncRange status callbacks", () => {
 		await syncRange(new FakeVault() as never, baseDeps(), 0, { onStart, onSuccess, onError });
 		expect(onStart).not.toHaveBeenCalled();
 		expect(onSuccess).not.toHaveBeenCalled();
-		expect(onError).toHaveBeenCalledWith("connect your Google account first");
+		expect(onError).toHaveBeenCalledWith('connect the Google account "Google account" first');
 	});
 
 	it("calls onError when no calendars are enabled", async () => {
 		const onError = vi.fn();
 		const deps = connectedDeps();
-		deps.settings.calendars = [];
+		deps.settings.googleAccounts[0].calendars = [];
 		await syncRange(new FakeVault() as never, deps, 0, { onError });
 		expect(onError).toHaveBeenCalledWith("no calendars enabled");
 	});
@@ -121,20 +178,20 @@ describe("syncRange status callbacks", () => {
 		deps.settings.templatePath = ""; // ensureDailyNote throws without a template configured
 		const onError = vi.fn();
 		await syncRange(vault as never, deps, 0, { notify: false, onError });
-		expect(onError).toHaveBeenCalledWith("Set a template file in Obcaldian settings first.");
+		expect(onError).toHaveBeenCalledWith("Set a template file in DailyCalSync settings first.");
 	});
 
 	it("does not overwrite a note or report success when one calendar fetch fails", async () => {
 		const vault = new FakeVault();
 		const todayPath = `${moment().format("YYYYMMDD")}.md`;
 		const original = [
-			"<!-- obcaldian:calendar:start -->",
+			"<!-- dailycalsync:calendar:start -->",
 			"previous calendar content",
-			"<!-- obcaldian:calendar:end -->",
+			"<!-- dailycalsync:calendar:end -->",
 		].join("\n");
 		await vault.create(todayPath, original);
 		const deps = connectedDeps();
-		deps.settings.calendars.push({
+		deps.settings.googleAccounts[0].calendars.push({
 			id: "personal",
 			summary: "Personal",
 			enabled: true,
@@ -210,9 +267,9 @@ describe("sync planning, preview, and undo", () => {
 		const tomorrow = `${moment().add(1, "day").format("YYYYMMDD")}.md`;
 		const original = [
 			"outside",
-			"<!-- obcaldian:calendar:start -->",
+			"<!-- dailycalsync:calendar:start -->",
 			"old calendar",
-			"<!-- obcaldian:calendar:end -->",
+			"<!-- dailycalsync:calendar:end -->",
 		].join("\n");
 		await vault.create(today, original);
 		await vault.create(tomorrow, "missing markers");
@@ -231,9 +288,9 @@ describe("sync planning, preview, and undo", () => {
 			today,
 			[
 				"outside before",
-				"<!-- obcaldian:calendar:start -->",
+				"<!-- dailycalsync:calendar:start -->",
 				"old calendar",
-				"<!-- obcaldian:calendar:end -->",
+				"<!-- dailycalsync:calendar:end -->",
 			].join("\n")
 		);
 		let snapshot: SyncUndoSnapshot | undefined;
@@ -270,13 +327,13 @@ describe("sync planning, preview, and undo", () => {
 			start: { dateTime: moment().add(1, "day").hour(12).toISOString() },
 			end: { dateTime: moment().add(1, "day").hour(13).toISOString() },
 		};
-		const key = `${multiDayEventKey("work", "series-1")}::${originalStartTime.dateTime}`;
+		const key = `${multiDayEventKey(SOURCE_ID, "series-1")}::${originalStartTime.dateTime}`;
 		await vault.create(
 			`${moment().format("YYYYMMDD")}.md`,
 			[
-				"<!-- obcaldian:calendar:start -->",
+				"<!-- dailycalsync:calendar:start -->",
 				`- [x] Standup ${multiDayEventMarker(key)} bring the report`,
-				"<!-- obcaldian:calendar:end -->",
+				"<!-- dailycalsync:calendar:end -->",
 			].join("\n")
 		);
 		vi.mocked(calendarCacheEvents).mockReturnValue([oldEvent]);
@@ -309,13 +366,13 @@ describe("multi-day completion behavior", () => {
 	async function vaultWithCheckedFirstDay(event: GoogleEvent): Promise<FakeVault> {
 		const vault = new FakeVault();
 		await vault.create("Templates/Daily.md", "{{date}}\n{calendar}\n");
-		const key = multiDayEventKey("work", event.id!);
+		const key = multiDayEventKey(SOURCE_ID, event.id!);
 		await vault.create(
 			`${moment().format("YYYYMMDD")}.md`,
 			[
-				"<!-- obcaldian:calendar:start -->",
+				"<!-- dailycalsync:calendar:start -->",
 				`- [x] Conference ${multiDayEventMarker(key)}`,
-				"<!-- obcaldian:calendar:end -->",
+				"<!-- dailycalsync:calendar:end -->",
 			].join("\n")
 		);
 		return vault;
@@ -331,7 +388,7 @@ describe("multi-day completion behavior", () => {
 
 		await syncRange(vault as never, deps, 1, { notify: false });
 
-		const key = multiDayEventKey("work", event.id!);
+		const key = multiDayEventKey(SOURCE_ID, event.id!);
 		expect(deps.settings.multiDayCompletionRules[key]).toEqual({
 			completedFrom: moment().format("YYYY-MM-DD"),
 			eventEnd: moment().add(2, "days").format("YYYY-MM-DD"),
@@ -384,7 +441,7 @@ describe("multi-day completion behavior", () => {
 
 		await syncRange(vault as never, deps, 0, { confirmMultiDay });
 
-		const key = multiDayEventKey("work", event.id!);
+		const key = multiDayEventKey(SOURCE_ID, event.id!);
 		expect(deps.settings.multiDayCompletionRules[key]?.completedFrom).toBe(
 			moment().format("YYYY-MM-DD")
 		);

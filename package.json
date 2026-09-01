@@ -1,7 +1,7 @@
 {
-	"name": "obcaldian",
+	"name": "dailycalsync",
 	"version": "0.1.0",
-	"description": "Generate daily notes from your own template, with a plugin-managed section synced to selected Google calendars.",
+	"description": "Sync multiple Google accounts and Secret iCalendar feeds into managed daily-note sections.",
 	"main": "main.js",
 	"scripts": {
 		"dev": "node esbuild.config.mjs",
@@ -18,7 +18,7 @@
 	"devDependencies": {
 		"@eslint/js": "^9.39.5",
 		"@types/node": "^20.11.5",
-		"esbuild": "^0.19.11",
+		"esbuild": "^0.28.2",
 		"eslint": "^9.39.5",
 		"eslint-plugin-obsidianmd": "^0.4.2",
 		"globals": "^17.11.0",
@@ -27,6 +27,6 @@
 		"tslib": "2.6.2",
 		"typescript": "5.3.3",
 		"typescript-eslint": "^8.69.0",
-		"vitest": "^2.1.9"
+		"vitest": "^4.1.11"
 	}
 }

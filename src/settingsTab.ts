@@ -1,5 +1,5 @@
-import { App, Notice, PluginSettingTab, SecretComponent, Setting } from "obsidian";
-import type ObcaldianPlugin from "./main";
+import { App, Modal, Notice, PluginSettingTab, SecretComponent, Setting } from "obsidian";
+import type DailyCalSyncPlugin from "./main";
 import {
 	connectGoogleAccount,
 	disconnectGoogleAccount,
@@ -9,500 +9,391 @@ import {
 	setClientSecret,
 } from "./googleAuth";
 import { listCalendars } from "./googleCalendar";
+import { clearICalUrl, getICalUrl, setICalUrl } from "./ical";
+import { OnboardingModal } from "./onboardingModal";
+import { PrivacyModal } from "./privacyModal";
+import type { CalendarConfig, GoogleAccountProfile, RenderingSettings } from "./settings";
 import { syncAll } from "./sync";
 import { isValidTimeZone } from "./timezone";
-import type { RenderingSettings } from "./settings";
-import { PrivacyModal } from "./privacyModal";
 
 type BooleanRenderingKey = {
 	[Key in keyof RenderingSettings]: RenderingSettings[Key] extends boolean ? Key : never;
 }[keyof RenderingSettings];
 
-export class ObcaldianSettingTab extends PluginSettingTab {
-	plugin: ObcaldianPlugin;
+function localId(prefix: string): string {
+	const random = window.crypto.randomUUID?.() ?? `${Date.now()}-${Math.random().toString(36).slice(2)}`;
+	return `${prefix}-${random.toLowerCase().replace(/[^a-z0-9-]/g, "").slice(0, 48)}`;
+}
+
+class ConfirmRemovalModal extends Modal {
+	constructor(
+		app: App,
+		private readonly label: string,
+		private readonly confirm: () => Promise<void>
+	) {
+		super(app);
+	}
+
+	onOpen(): void {
+		this.titleEl.setText("Confirm removal");
+		this.contentEl.createEl("p", { text: `Remove ${this.label}? Existing Markdown will not be deleted.` });
+		new Setting(this.contentEl)
+			.addButton((button) => button.setButtonText("Cancel").onClick(() => this.close()))
+			.addButton((button) => button.setButtonText("Remove").setWarning().onClick(async () => {
+				this.close();
+				await this.confirm();
+			}));
+	}
+
+	onClose(): void {
+		this.contentEl.empty();
+	}
+}
+
+export class DailyCalSyncSettingTab extends PluginSettingTab {
 	private connectionAbortController: AbortController | null = null;
 
-	constructor(app: App, plugin: ObcaldianPlugin) {
+	constructor(app: App, public readonly plugin: DailyCalSyncPlugin) {
 		super(app, plugin);
-		this.plugin = plugin;
 	}
 
 	display(): void {
 		const { containerEl } = this;
 		containerEl.empty();
 		const settings = this.plugin.settings;
-		const deps = this.plugin.authDeps();
 
-		new Setting(containerEl).setName("Daily notes").setHeading();
+		new Setting(containerEl).setName("Setup").setHeading();
+		const configuredSources = settings.googleAccounts.length + settings.iCalCalendars.length;
+		const enabledCalendars = settings.googleAccounts.reduce(
+			(total, account) => total + account.calendars.filter((calendar) => calendar.enabled).length,
+			settings.iCalCalendars.filter((calendar) => calendar.enabled).length
+		);
 		new Setting(containerEl)
-			.setName("Reuse core Daily Notes settings")
-			.setDesc("Copy the enabled core plugin's folder, template, and filename format.")
-			.addToggle((toggle) =>
-				toggle.setValue(settings.useDailyNotesSettings).onChange(async (value) => {
-					settings.useDailyNotesSettings = value;
-					await this.plugin.saveSettings();
-					if (value && !(await this.plugin.syncDailyNotesSettings())) {
-						new Notice("Obcaldian: the core Daily Notes plugin is not enabled or configured.");
-					}
-					this.display();
-				})
+			.setName(settings.onboardingComplete ? "Setup overview" : "Finish setup")
+			.setDesc(
+				`Daily notes: ${settings.templatePath || settings.useDailyNotesSettings ? "configured" : "needs a template"} · Sources: ${configuredSources} · Enabled calendars: ${enabledCalendars}`
 			)
 			.addButton((button) =>
-				button
-					.setButtonText("Refresh")
-					.setDisabled(!settings.useDailyNotesSettings)
-					.onClick(async () => {
-						if (!(await this.plugin.syncDailyNotesSettings())) {
-							new Notice("Obcaldian: the core Daily Notes plugin is not enabled or configured.");
-						}
-						this.display();
-					})
-			);
-
-		new Setting(containerEl)
-			.setName("Daily note folder")
-			.setDesc("Vault folder for generated daily notes. Leave blank for the vault root.")
-			.addText((text) =>
-				text.setValue(settings.dailyNoteFolder).onChange(async (value) => {
-					settings.dailyNoteFolder = value;
-					await this.plugin.saveSettings();
+				button.setButtonText(settings.onboardingComplete ? "Run setup again" : "Start guided setup").setCta().onClick(() => {
+					new OnboardingModal(this.app, this.plugin, () => this.display()).open();
 				})
 			);
 
-		new Setting(containerEl)
-			.setName("Template file")
-			.setDesc(
-				'Vault path to your template note. Use {{date}} for the date and a literal {calendar} on its own line to mark the plugin-managed section.'
-			)
-			.addText((text) =>
-				text
-					.setPlaceholder("Templates/Daily.md")
-					.setValue(settings.templatePath)
-					.onChange(async (value) => {
-						settings.templatePath = value;
-						await this.plugin.saveSettings();
-					})
-			);
-
-		new Setting(containerEl)
-			.setName("Filename format")
-			.setDesc("Moment-style daily note filename format, for example YYYY-MM-DD.")
-			.addText((text) =>
-				text.setValue(settings.dailyNoteFormat).onChange(async (value) => {
-					settings.dailyNoteFormat = value.trim() || "YYYYMMDD";
-					await this.plugin.saveSettings();
-				})
-			);
-
-		new Setting(containerEl)
-			.setName("Missing notes")
-			.setDesc("Choose whether range sync may create notes or only update notes already present.")
-			.addDropdown((dropdown) =>
-				dropdown
-					.addOption("create-missing", "Create missing notes")
-					.addOption("existing-only", "Update existing notes only")
-					.setValue(settings.noteCreationMode)
-					.onChange(async (value) => {
-						settings.noteCreationMode = value as typeof settings.noteCreationMode;
-						await this.plugin.saveSettings();
-					})
-			);
-
-		const timezoneDescription =
-			"IANA time zone (e.g. America/New_York) used to align each day's sync window with Google Calendar. Defaults to your system timezone.";
-		const timezoneSetting = new Setting(containerEl)
-			.setName("Timezone")
-			.setDesc(timezoneDescription)
-			.addText((text) =>
-				text.setValue(settings.timezone).onChange(async (value) => {
-					const trimmed = value.trim();
-					if (!isValidTimeZone(trimmed)) {
-						timezoneSetting.setDesc(
-							"Not a recognized IANA time zone, e.g. America/New_York."
-						);
-						timezoneSetting.descEl.addClass("obcaldian-setting-error");
-						return;
-					}
-					timezoneSetting.setDesc(timezoneDescription);
-					timezoneSetting.descEl.removeClass("obcaldian-setting-error");
-					settings.timezone = trimmed;
-					await this.plugin.saveSettings();
-				})
-			);
-
-		new Setting(containerEl)
-			.setName("Days ahead to sync")
-			.setDesc(
-				'Default number of days beyond today that "Sync now" covers. The "Sync next N days..." command can override this per run.'
-			)
-			.addText((text) => {
-				text.inputEl.type = "number";
-				text.inputEl.min = "0";
-				text.setValue(String(settings.syncDaysAhead)).onChange(async (value) => {
-					const parsed = Number(value);
-					if (Number.isFinite(parsed) && parsed >= 0) {
-						settings.syncDaysAhead = Math.floor(parsed);
-						await this.plugin.saveSettings();
-					}
-				});
-			});
-
-		new Setting(containerEl).setName("Google account").setHeading();
 		new Setting(containerEl)
 			.setName("Privacy and data handling")
-			.setDesc("Review what is read from Google, written locally, and sent over the network.")
-			.addButton((button) =>
-				button.setButtonText("View policy").onClick(() => new PrivacyModal(this.app).open())
-			);
+			.setDesc("Review local storage, calendar data, Secret iCal URLs, and permitted network traffic.")
+			.addButton((button) => button.setButtonText("View policy").onClick(() => new PrivacyModal(this.app).open()));
 
-		const credentialsInput = containerEl.createEl("input", {
-			type: "file",
-			cls: "obcaldian-file-input",
-		});
+		this.renderDailyNotes();
+		this.renderGoogleAccounts();
+		this.renderICalFeeds();
+		this.renderRendering();
+		this.renderSync();
+	}
+
+	private renderDailyNotes(): void {
+		const settings = this.plugin.settings;
+		new Setting(this.containerEl).setName("Daily notes").setHeading();
+		new Setting(this.containerEl)
+			.setName("Reuse core Daily Notes settings")
+			.setDesc("Copy the core plugin's folder, template, and filename format.")
+			.addToggle((toggle) => toggle.setValue(settings.useDailyNotesSettings).onChange(async (value) => {
+				settings.useDailyNotesSettings = value;
+				if (value && !(await this.plugin.syncDailyNotesSettings())) {
+					new Notice("DailyCalSync: the core Daily Notes plugin is not enabled or configured.");
+				} else await this.plugin.saveSettings();
+				this.display();
+			}))
+			.addButton((button) => button.setButtonText("Refresh").setDisabled(!settings.useDailyNotesSettings).onClick(async () => {
+				if (!(await this.plugin.syncDailyNotesSettings())) new Notice("DailyCalSync: the core Daily Notes plugin is not enabled or configured.");
+				this.display();
+			}));
+		new Setting(this.containerEl).setName("Daily note folder").setDesc("Leave blank for the vault root.").addText((text) =>
+			text.setValue(settings.dailyNoteFolder).onChange(async (value) => {
+				settings.dailyNoteFolder = value;
+				await this.plugin.saveSettings();
+			})
+		);
+		new Setting(this.containerEl).setName("Template file").setDesc("Use {{date}} and put {calendar} where the managed section belongs.").addText((text) =>
+			text.setPlaceholder("Templates/Daily.md").setValue(settings.templatePath).onChange(async (value) => {
+				settings.templatePath = value;
+				await this.plugin.saveSettings();
+			})
+		);
+		new Setting(this.containerEl).setName("Filename format").setDesc("Moment-style format, for example YYYY-MM-DD.").addText((text) =>
+			text.setValue(settings.dailyNoteFormat).onChange(async (value) => {
+				settings.dailyNoteFormat = value.trim() || "YYYYMMDD";
+				await this.plugin.saveSettings();
+			})
+		);
+		new Setting(this.containerEl).setName("Missing notes").addDropdown((dropdown) => dropdown
+			.addOption("create-missing", "Create missing notes")
+			.addOption("existing-only", "Update existing notes only")
+			.setValue(settings.noteCreationMode)
+			.onChange(async (value) => {
+				settings.noteCreationMode = value as typeof settings.noteCreationMode;
+				await this.plugin.saveSettings();
+			}));
+		const timezoneSetting = new Setting(this.containerEl).setName("Timezone").setDesc("IANA time zone used for day boundaries.");
+		timezoneSetting.addText((text) => text.setValue(settings.timezone).onChange(async (value) => {
+			const trimmed = value.trim();
+			if (!isValidTimeZone(trimmed)) {
+				timezoneSetting.setDesc("Not a recognized IANA time zone, e.g. America/New_York.");
+				timezoneSetting.descEl.addClass("dailycalsync-setting-error");
+				return;
+			}
+			timezoneSetting.setDesc("IANA time zone used for day boundaries.");
+			timezoneSetting.descEl.removeClass("dailycalsync-setting-error");
+			settings.timezone = trimmed;
+			await this.plugin.saveSettings();
+		}));
+	}
+
+	private renderGoogleAccounts(): void {
+		const settings = this.plugin.settings;
+		new Setting(this.containerEl).setName("Google accounts").setHeading();
+		new Setting(this.containerEl)
+			.setName("Add account")
+			.setDesc("Each profile has isolated credentials, tokens, calendars, cache, and health state.")
+			.addButton((button) => button.setButtonText("Add Google account").setCta().onClick(async () => {
+				settings.googleAccounts.push({ id: localId("google"), name: `Google account ${settings.googleAccounts.length + 1}`, clientId: "", projectId: "", calendars: [], calendarHealth: {}, calendarCaches: {} });
+				await this.plugin.saveSettings();
+				this.display();
+			}));
+
+		if (settings.googleAccounts.length === 0) this.containerEl.createEl("p", { text: "No Google accounts yet. Add one, import its Desktop OAuth JSON, then connect.", cls: "dailycalsync-status" });
+		for (const account of settings.googleAccounts) this.renderGoogleAccount(account);
+	}
+
+	private renderGoogleAccount(account: GoogleAccountProfile): void {
+		const deps = this.plugin.authDeps(account.id);
+		new Setting(this.containerEl).setName(account.name).setHeading();
+		new Setting(this.containerEl).setName("Profile name").addText((text) => text.setValue(account.name).onChange(async (value) => {
+			account.name = value.trim() || "Google account";
+			await this.plugin.saveSettings();
+		}));
+		const credentialsInput = this.containerEl.createEl("input", { type: "file", cls: "dailycalsync-file-input" });
 		credentialsInput.setAttr("accept", "application/json,.json");
-		credentialsInput.addEventListener("change", () => {
-			void (async () => {
-				const file = credentialsInput.files?.[0];
-				if (!file) return;
-				try {
-					const imported = await importGoogleCredentials(deps, await file.text());
-					new Notice(`Obcaldian: imported credentials for project ${imported.projectId}.`);
-					this.display();
-				} catch (error) {
-					new Notice(`Obcaldian: credentials import failed — ${(error as Error).message}`);
-				} finally {
-					credentialsInput.value = "";
-				}
-			})();
-		});
-
-		new Setting(containerEl)
-			.setName("Import Google credentials JSON")
-			.setDesc(
-				"Recommended: select the downloaded credentials for an OAuth Desktop app. The file and its path are not retained."
-			)
-			.addButton((button) =>
-				button.setButtonText("Import JSON").setCta().onClick(() => credentialsInput.click())
-			);
-
-		if (settings.googleProjectId) {
-			new Setting(containerEl)
-				.setName("Imported Google project")
-				.setDesc(settings.googleProjectId);
-		}
-
-		new Setting(containerEl)
-			.setName("Client ID")
-			.setDesc("From an OAuth 'Desktop app' client in your own Google Cloud project.")
-			.addText((text) =>
-				text.setValue(settings.googleClientId).onChange(async (value) => {
-					settings.googleClientId = value.trim();
-					await this.plugin.saveSettings();
-				})
-			);
-
-		new Setting(containerEl)
-			.setName("Client secret")
-			.setDesc("Stored in Obsidian's secret storage, not in plain text in your vault.")
-			.addComponent((el) =>
-				new SecretComponent(this.app, el).setValue(getClientSecret(deps)).onChange((value) => {
-					setClientSecret(deps, value.trim());
-				})
-			);
-
+		credentialsInput.addEventListener("change", () => void (async () => {
+			const file = credentialsInput.files?.[0];
+			if (!file) return;
+			try {
+				const imported = await importGoogleCredentials(deps, await file.text());
+				new Notice(`DailyCalSync: imported credentials for ${account.name} (${imported.projectId}).`);
+			} catch (error) {
+				new Notice(`DailyCalSync: credentials import failed — ${(error as Error).message}`);
+			} finally {
+				credentialsInput.value = "";
+				this.display();
+			}
+		})());
+		new Setting(this.containerEl).setName("Desktop OAuth credentials").setDesc(account.projectId ? `Project: ${account.projectId}` : "Import the JSON downloaded for an OAuth Desktop app.").addButton((button) =>
+			button.setButtonText("Import JSON").onClick(() => credentialsInput.click())
+		);
+		new Setting(this.containerEl).setName("Client ID").addText((text) => text.setValue(account.clientId).onChange(async (value) => {
+			account.clientId = value.trim();
+			await this.plugin.saveSettings();
+		}));
+		new Setting(this.containerEl).setName("Client secret").setDesc("Stored in Obsidian SecretStorage.").addComponent((element) =>
+			new SecretComponent(this.app, element).setValue(getClientSecret(deps)).onChange((value) => setClientSecret(deps, value.trim()))
+		);
 		const connected = isConnected(deps);
-		const accountSetting = new Setting(containerEl)
-			.setName("Google account")
-			.setDesc(connected ? "Connected" : "Not connected")
-			.addButton((btn) =>
-				btn
-					.setButtonText(
-						this.connectionAbortController
-							? "Connecting..."
-							: connected
-								? "Reconnect"
-								: "Connect"
-					)
-					.setDisabled(this.connectionAbortController !== null)
-					.setCta()
-					.onClick(async () => {
-						const controller = new AbortController();
-						this.connectionAbortController = controller;
-						this.display();
-						try {
-							await connectGoogleAccount(deps, { signal: controller.signal });
-							new Notice("Obcaldian: Google account connected.");
-							await this.refreshCalendarList();
-						} catch (e) {
-							new Notice(`Obcaldian: connection failed — ${(e as Error).message}`);
-						} finally {
-							if (this.connectionAbortController === controller) {
-								this.connectionAbortController = null;
-							}
-							this.display();
-						}
-					})
-			)
-			.addButton((btn) =>
-				btn
-					.setButtonText("Disconnect")
-					.setDisabled(!connected)
-					.onClick(async () => {
-						await disconnectGoogleAccount(deps);
-						new Notice("Obcaldian: Google account disconnected.");
-						this.display();
-					})
-			);
-		if (this.connectionAbortController) {
-			accountSetting.addButton((button) =>
-				button.setButtonText("Cancel connection").onClick(() => {
-					this.connectionAbortController?.abort();
-				})
-			);
-		}
+		const connection = new Setting(this.containerEl).setName("Connection").setDesc(connected ? "Connected" : "Not connected");
+		connection.addButton((button) => button
+			.setButtonText(this.connectionAbortController ? "Connecting…" : connected ? "Reconnect" : "Connect")
+			.setDisabled(this.connectionAbortController !== null)
+			.setCta()
+			.onClick(async () => {
+				const controller = new AbortController();
+				this.connectionAbortController = controller;
+				this.display();
+				try {
+					await connectGoogleAccount(deps, { signal: controller.signal });
+					new Notice(`DailyCalSync: ${account.name} connected.`);
+					await this.refreshCalendarList(account);
+				} catch (error) {
+					new Notice(`DailyCalSync: connection failed — ${(error as Error).message}`);
+				} finally {
+					if (this.connectionAbortController === controller) this.connectionAbortController = null;
+					this.display();
+				}
+			}));
+		connection.addButton((button) => button.setButtonText("Disconnect").setDisabled(!connected).onClick(async () => {
+			await disconnectGoogleAccount(deps);
+			new Notice(`DailyCalSync: ${account.name} disconnected.`);
+			this.display();
+		}));
+		if (this.connectionAbortController) connection.addButton((button) => button.setButtonText("Cancel").onClick(() => this.connectionAbortController?.abort()));
+		new Setting(this.containerEl).setName("Calendars").setDesc("Refresh after connecting, then enable the calendars to sync.").addButton((button) => button.setButtonText("Refresh list").setDisabled(!connected).onClick(async () => {
+			await this.refreshCalendarList(account);
+			this.display();
+		}));
+		this.renderCalendarRows(account.calendars, async () => this.plugin.saveSettings());
+		new Setting(this.containerEl).setName("Remove profile").setDesc("Revokes the token when possible, then clears this profile's local secrets and cache.").addButton((button) => button.setButtonText("Remove").setWarning().onClick(() => {
+			new ConfirmRemovalModal(this.app, account.name, async () => {
+				await disconnectGoogleAccount(deps);
+				setClientSecret(deps, "");
+				const index = this.plugin.settings.googleAccounts.indexOf(account);
+				if (index >= 0) this.plugin.settings.googleAccounts.splice(index, 1);
+				await this.plugin.saveSettings();
+				this.display();
+			}).open();
+		}));
+	}
 
-		new Setting(containerEl).setName("Calendars").setHeading();
-
-		new Setting(containerEl)
-			.setName("Refresh calendar list")
-			.setDesc("Fetch the list of calendars from your connected Google account.")
-			.addButton((btn) =>
-				btn
-					.setButtonText("Refresh")
-					.setDisabled(!connected)
-					.onClick(async () => {
-						await this.refreshCalendarList();
-						this.display();
-					})
-			);
-
-		if (settings.calendars.length === 0) {
-			containerEl.createEl("p", {
-				text: connected
-					? "No calendars loaded yet — click Refresh."
-					: "Connect your Google account, then refresh to list your calendars.",
-				cls: "obcaldian-status",
-			});
-		}
-
-		for (const cal of settings.calendars) {
-			const row = new Setting(containerEl).setName(cal.summary);
-			row.addToggle((toggle) =>
-				toggle.setValue(cal.enabled).onChange(async (value) => {
-					cal.enabled = value;
-					await this.plugin.saveSettings();
-				})
-			);
-			row.addDropdown((dropdown) =>
-				dropdown
-					.addOption("checkbox", "Add as - [ ]")
-					.addOption("bullet", "Add as -")
-					.setValue(cal.addAs)
-					.onChange(async (value) => {
-						cal.addAs = value as typeof cal.addAs;
-						await this.plugin.saveSettings();
-					})
-			);
-			row.addExtraButton((button) =>
-				button
-					.setIcon("arrow-up")
-					.setTooltip("Move calendar earlier")
-					.onClick(async () => {
-						const index = settings.calendars.indexOf(cal);
-						if (index <= 0) return;
-						settings.calendars.splice(index - 1, 0, settings.calendars.splice(index, 1)[0]);
-						await this.plugin.saveSettings();
-						this.display();
-					})
-			);
-			row.addExtraButton((button) =>
-				button
-					.setIcon("arrow-down")
-					.setTooltip("Move calendar later")
-					.onClick(async () => {
-						const index = settings.calendars.indexOf(cal);
-						if (index === -1 || index >= settings.calendars.length - 1) return;
-						settings.calendars.splice(index + 1, 0, settings.calendars.splice(index, 1)[0]);
-						await this.plugin.saveSettings();
-						this.display();
-					})
-			);
-		}
-
-		new Setting(containerEl).setName("Rendering and privacy").setHeading();
-		const addRenderingToggle = (
-			name: string,
-			description: string,
-			key: BooleanRenderingKey
-		): void => {
-			new Setting(containerEl)
-				.setName(name)
-				.setDesc(description)
-				.addToggle((toggle) =>
-					toggle.setValue(settings.rendering[key]).onChange(async (value) => {
-						settings.rendering[key] = value;
-						await this.plugin.saveSettings();
-					})
-				);
-		};
-		addRenderingToggle("All-day events first", "Group all-day events before timed events.", "allDayFirst");
-		addRenderingToggle("Descriptions", "Persist event descriptions in footnotes.", "showDescriptions");
-		addRenderingToggle("Attendees", "Persist attendee lists for events with at least three attendees.", "showAttendees");
-		addRenderingToggle("Attendee email addresses", "Use email addresses when an attendee has no display name.", "includeAttendeeEmails");
-		addRenderingToggle("Locations", "Persist event locations in footnotes.", "showLocations");
-		addRenderingToggle("Meeting links", "Persist HTTPS meeting links in footnotes.", "showMeetingLinks");
-		addRenderingToggle("Redact private events", "Render private and confidential events as Busy without details.", "redactPrivateEvents");
-		addRenderingToggle("Declined events", "Include events that you declined.", "includeDeclined");
-		addRenderingToggle("Cancelled events", "Include cancelled occurrences.", "includeCancelled");
-		addRenderingToggle("Free events", "Include events marked transparent/free.", "includeFreeEvents");
-		addRenderingToggle("Focus time", "Include Google focus-time events.", "includeFocusTime");
-		addRenderingToggle("Out of office", "Include Google out-of-office events.", "includeOutOfOffice");
-		addRenderingToggle("Working location", "Include Google working-location events.", "includeWorkingLocation");
-		addRenderingToggle("Birthdays", "Include Google birthday events.", "includeBirthdays");
-		addRenderingToggle("Calendar colors", "Show Google calendar colors using theme-aware CSS classes.", "useGoogleCalendarColors");
-		new Setting(containerEl)
-			.setName("Time locale")
-			.setDesc("BCP 47 locale, or system to use the operating-system locale.")
-			.addText((text) =>
-				text.setValue(settings.rendering.locale).onChange(async (value) => {
-					settings.rendering.locale = value.trim() || "system";
-					await this.plugin.saveSettings();
-				})
-			);
-		new Setting(containerEl)
-			.setName("Clock")
-			.addDropdown((dropdown) =>
-				dropdown
-					.addOption("system", "System default")
-					.addOption("12", "12-hour")
-					.addOption("24", "24-hour")
-					.setValue(settings.rendering.hourCycle)
-					.onChange(async (value) => {
-						settings.rendering.hourCycle = value as typeof settings.rendering.hourCycle;
-						await this.plugin.saveSettings();
-					})
-			);
-		addRenderingToggle("End times", "Show an event's end time when available.", "showEndTime");
-		new Setting(containerEl)
-			.setName("Time range separator")
-			.setDesc("Text placed between start and end times.")
-			.addText((text) =>
-				text.setValue(settings.rendering.timeSeparator).onChange(async (value) => {
-					settings.rendering.timeSeparator = value.slice(0, 8) || "-";
-					await this.plugin.saveSettings();
-				})
-			);
-
-		new Setting(containerEl).setName("Sync").setHeading();
-		new Setting(containerEl)
-			.setName("When a multi-day event is checked")
-			.setDesc(
-				"Choose whether each day stays independent or completion carries into following days. Remembered choices also apply when a later note is first synced."
-			)
-			.addDropdown((dropdown) =>
-				dropdown
-					.addOption("independent", "Keep each day independent")
-					.addOption("ask", "Ask during manual sync")
-					.addOption("following", "Mark following days done")
-					.setValue(settings.multiDayCompletionBehavior)
-					.onChange(async (value) => {
-						settings.multiDayCompletionBehavior =
-							value as typeof settings.multiDayCompletionBehavior;
-						if (value === "independent") settings.multiDayCompletionRules = {};
-						await this.plugin.saveSettings();
-						this.display();
-					})
-			);
-
-		new Setting(containerEl)
-			.setName("Remembered multi-day completions")
-			.setDesc(
-				`${Object.keys(settings.multiDayCompletionRules).length} active rule(s). Clear these to stop applying prior “mark following” choices to notes synced later.`
-			)
-			.addButton((button) =>
-				button
-					.setButtonText("Clear")
-					.setDisabled(Object.keys(settings.multiDayCompletionRules).length === 0)
-					.onClick(async () => {
-						settings.multiDayCompletionRules = {};
-						await this.plugin.saveSettings();
-						this.display();
-					})
-			);
-
-		new Setting(containerEl)
-			.setName("Sync now")
-			.setDesc("Pull events from all enabled calendars into today's note and the configured days ahead.")
-			.addButton((btn) =>
-				btn
-					.setButtonText("Sync now")
-					.setCta()
-					.onClick(async () => {
-						await syncAll(
-							this.app.vault,
-							this.plugin.authDeps(),
-							this.plugin.syncOptions()
-						);
-					})
-			);
-
-		new Setting(containerEl)
-			.setName("Automatic calendar check (minutes)")
-			.setDesc(
-				"Quietly check and sync enabled calendars this often. Defaults to every 3 hours; 0 disables it."
-			)
-			.addText((text) => {
-				text.inputEl.type = "number";
-				text.inputEl.min = "0";
-				text.setValue(String(settings.autoSyncIntervalMinutes)).onChange(async (value) => {
-					const parsed = Number(value);
-					if (Number.isFinite(parsed) && parsed >= 0) {
-						settings.autoSyncIntervalMinutes = Math.floor(parsed);
-						await this.plugin.saveSettings();
-						this.plugin.applyAutoSyncInterval();
+	private renderICalFeeds(): void {
+		const settings = this.plugin.settings;
+		new Setting(this.containerEl).setName("Secret iCalendar feeds").setHeading();
+		new Setting(this.containerEl).setName("Add read-only feed").setDesc("The HTTPS URL is stored only in Obsidian SecretStorage. Treat it like a password.").addButton((button) => button.setButtonText("Add iCal feed").onClick(async () => {
+			settings.iCalCalendars.push({ id: localId("ical"), summary: `iCalendar ${settings.iCalCalendars.length + 1}`, enabled: true, addAs: "checkbox" });
+			await this.plugin.saveSettings();
+			this.display();
+		}));
+		for (const calendar of settings.iCalCalendars) {
+			new Setting(this.containerEl).setName(calendar.summary).setHeading();
+			new Setting(this.containerEl).setName("Feed name").addText((text) => text.setValue(calendar.summary).onChange(async (value) => {
+				calendar.summary = value.trim() || "iCalendar feed";
+				await this.plugin.saveSettings();
+			}));
+			const urlSetting = new Setting(this.containerEl).setName("Secret HTTPS URL").setDesc("Saved in SecretStorage and redacted from diagnostics.");
+			urlSetting.addText((text) => {
+				text.inputEl.type = "password";
+				text.setValue(getICalUrl(this.plugin.authDeps(), calendar.id));
+				text.setPlaceholder("https://…/calendar.ics");
+				text.inputEl.addEventListener("change", () => {
+					try {
+						if (text.inputEl.value.trim()) setICalUrl(this.plugin.authDeps(), calendar.id, text.inputEl.value);
+						else clearICalUrl(this.plugin.authDeps(), calendar.id);
+						urlSetting.setDesc("Saved securely. The feed is fetched only during sync.");
+						urlSetting.descEl.removeClass("dailycalsync-setting-error");
+					} catch (error) {
+						urlSetting.setDesc((error as Error).message);
+						urlSetting.descEl.addClass("dailycalsync-setting-error");
 					}
 				});
 			});
-
-		const failedCalendars = settings.calendars.filter(
-			(calendar) => settings.calendarHealth[calendar.id]?.lastFailureAt
-		).length;
-		new Setting(containerEl)
-			.setName("Sync health")
-			.setDesc(
-				`Last successful sync: ${settings.lastSuccessfulSyncAt ? window.moment(settings.lastSuccessfulSyncAt).fromNow() : "never"}. ${failedCalendars} calendar(s) have a recorded failure.`
-			);
-		new Setting(containerEl)
-			.setName("Diagnostics")
-			.setDesc(
-				"Copy versions, platform, timezone, note configuration, network hosts, and categorized failures. Credentials and calendar content are excluded."
-			)
-			.addButton((button) =>
-				button.setButtonText("Copy diagnostics").onClick(async () => {
-					await this.plugin.copyDiagnostics();
-				})
-			);
+			this.renderCalendarRows([calendar], async () => this.plugin.saveSettings(), false);
+			new Setting(this.containerEl).setName("Remove feed").addButton((button) => button.setButtonText("Remove").setWarning().onClick(() => {
+				new ConfirmRemovalModal(this.app, calendar.summary, async () => {
+					clearICalUrl(this.plugin.authDeps(), calendar.id);
+					delete settings.iCalCaches[calendar.id];
+					settings.iCalCalendars = settings.iCalCalendars.filter((candidate) => candidate !== calendar);
+					await this.plugin.saveSettings();
+					this.display();
+				}).open();
+			}));
+		}
 	}
 
-	private async refreshCalendarList(): Promise<void> {
+	private renderCalendarRows(calendars: CalendarConfig[], save: () => Promise<void>, allowReorder = true): void {
+		for (const calendar of calendars) {
+			const row = new Setting(this.containerEl).setName(calendar.summary);
+			row.addToggle((toggle) => toggle.setValue(calendar.enabled).onChange(async (value) => {
+				calendar.enabled = value;
+				await save();
+			}));
+			row.addDropdown((dropdown) => dropdown.addOption("checkbox", "Checkbox").addOption("bullet", "Bullet").setValue(calendar.addAs).onChange(async (value) => {
+				calendar.addAs = value as typeof calendar.addAs;
+				await save();
+			}));
+			if (allowReorder) {
+				row.addExtraButton((button) => button.setIcon("arrow-up").setTooltip("Move earlier").onClick(async () => {
+					const index = calendars.indexOf(calendar);
+					if (index > 0) calendars.splice(index - 1, 0, calendars.splice(index, 1)[0]);
+					await save();
+					this.display();
+				}));
+				row.addExtraButton((button) => button.setIcon("arrow-down").setTooltip("Move later").onClick(async () => {
+					const index = calendars.indexOf(calendar);
+					if (index >= 0 && index < calendars.length - 1) calendars.splice(index + 1, 0, calendars.splice(index, 1)[0]);
+					await save();
+					this.display();
+				}));
+			}
+		}
+	}
+
+	private renderRendering(): void {
 		const settings = this.plugin.settings;
+		new Setting(this.containerEl).setName("Rendering and privacy").setHeading();
+		const addToggle = (name: string, description: string, key: BooleanRenderingKey): void => {
+			new Setting(this.containerEl).setName(name).setDesc(description).addToggle((toggle) => toggle.setValue(settings.rendering[key]).onChange(async (value) => {
+				settings.rendering[key] = value;
+				await this.plugin.saveSettings();
+			}));
+		};
+		addToggle("All-day events first", "Group all-day events before timed events.", "allDayFirst");
+		addToggle("Descriptions", "Persist event descriptions in footnotes.", "showDescriptions");
+		addToggle("Attendees", "Persist attendee lists for events with at least three attendees.", "showAttendees");
+		addToggle("Attendee email addresses", "Use emails when display names are unavailable.", "includeAttendeeEmails");
+		addToggle("Locations", "Persist event locations.", "showLocations");
+		addToggle("Meeting links", "Persist HTTPS meeting links.", "showMeetingLinks");
+		addToggle("Redact private events", "Render private events as Busy.", "redactPrivateEvents");
+		addToggle("Declined events", "Include declined events.", "includeDeclined");
+		addToggle("Cancelled events", "Include cancelled occurrences.", "includeCancelled");
+		addToggle("Free events", "Include transparent/free events.", "includeFreeEvents");
+		addToggle("Focus time", "Include Google focus-time events.", "includeFocusTime");
+		addToggle("Out of office", "Include Google out-of-office events.", "includeOutOfOffice");
+		addToggle("Working location", "Include Google working-location events.", "includeWorkingLocation");
+		addToggle("Birthdays", "Include Google birthday events.", "includeBirthdays");
+		addToggle("Calendar colors", "Use stable theme-aware calendar color classes.", "useGoogleCalendarColors");
+		new Setting(this.containerEl).setName("Clock").addDropdown((dropdown) => dropdown.addOption("system", "System default").addOption("12", "12-hour").addOption("24", "24-hour").setValue(settings.rendering.hourCycle).onChange(async (value) => {
+			settings.rendering.hourCycle = value as typeof settings.rendering.hourCycle;
+			await this.plugin.saveSettings();
+		}));
+		addToggle("End times", "Show event end times.", "showEndTime");
+	}
+
+	private renderSync(): void {
+		const settings = this.plugin.settings;
+		new Setting(this.containerEl).setName("Sync").setHeading();
+		new Setting(this.containerEl).setName("Days ahead").addText((text) => {
+			text.inputEl.type = "number";
+			text.inputEl.min = "0";
+			text.setValue(String(settings.syncDaysAhead)).onChange(async (value) => {
+				const parsed = Number(value);
+				if (Number.isFinite(parsed) && parsed >= 0) {
+					settings.syncDaysAhead = Math.floor(parsed);
+					await this.plugin.saveSettings();
+				}
+			});
+		});
+		new Setting(this.containerEl).setName("Multi-day completion").addDropdown((dropdown) => dropdown.addOption("independent", "Keep days independent").addOption("ask", "Ask during manual sync").addOption("following", "Mark following days done").setValue(settings.multiDayCompletionBehavior).onChange(async (value) => {
+			settings.multiDayCompletionBehavior = value as typeof settings.multiDayCompletionBehavior;
+			if (value === "independent") settings.multiDayCompletionRules = {};
+			await this.plugin.saveSettings();
+		}));
+		new Setting(this.containerEl).setName("Sync now").setDesc("Sync every enabled Google and iCalendar source into the configured range.").addButton((button) => button.setButtonText("Sync now").setCta().onClick(async () => {
+			await syncAll(this.app.vault, this.plugin.authDeps(), this.plugin.syncOptions());
+		}));
+		new Setting(this.containerEl).setName("Automatic check (minutes)").setDesc("0 disables background checks.").addText((text) => {
+			text.inputEl.type = "number";
+			text.inputEl.min = "0";
+			text.setValue(String(settings.autoSyncIntervalMinutes)).onChange(async (value) => {
+				const parsed = Number(value);
+				if (Number.isFinite(parsed) && parsed >= 0) {
+					settings.autoSyncIntervalMinutes = Math.floor(parsed);
+					await this.plugin.saveSettings();
+					this.plugin.applyAutoSyncInterval();
+				}
+			});
+		});
+		const failedCalendars = settings.googleAccounts.reduce((total, account) => total + account.calendars.filter((calendar) => account.calendarHealth[calendar.id]?.lastFailureAt).length, 0);
+		new Setting(this.containerEl).setName("Sync health").setDesc(`Last success: ${settings.lastSuccessfulSyncAt ? window.moment(settings.lastSuccessfulSyncAt).fromNow() : "never"}. ${failedCalendars} Google calendar(s) have a recorded failure.`);
+		new Setting(this.containerEl).setName("Diagnostics").setDesc("Copies redacted configuration and failures; URLs, IDs, credentials, and event content are excluded.").addButton((button) => button.setButtonText("Copy diagnostics").onClick(() => this.plugin.copyDiagnostics()));
+	}
+
+	private async refreshCalendarList(account: GoogleAccountProfile): Promise<void> {
 		try {
-			const fetched = await listCalendars(this.plugin.authDeps());
-			const existingById = new Map(settings.calendars.map((c) => [c.id, c]));
-			settings.calendars = fetched.map((f) => {
-				const existing = existingById.get(f.id);
-				return {
-					id: f.id,
-					summary: f.summary,
-					enabled: existing?.enabled ?? false,
-					addAs: existing?.addAs ?? "checkbox",
-					colorId: f.colorId ?? existing?.colorId,
-					color: f.backgroundColor ?? existing?.color,
-				};
+			const fetched = await listCalendars(this.plugin.authDeps(account.id));
+			const existingById = new Map(account.calendars.map((calendar) => [calendar.id, calendar]));
+			account.calendars = fetched.map((item) => {
+				const existing = existingById.get(item.id);
+				return { id: item.id, summary: item.summary, enabled: existing?.enabled ?? false, addAs: existing?.addAs ?? "checkbox", colorId: item.colorId ?? existing?.colorId, color: item.backgroundColor ?? existing?.color };
 			});
 			await this.plugin.saveSettings();
-		} catch (e) {
-			new Notice(`Obcaldian: failed to list calendars — ${(e as Error).message}`);
+		} catch (error) {
+			new Notice(`DailyCalSync: failed to list calendars for ${account.name} — ${(error as Error).message}`);
 		}
 	}
 }

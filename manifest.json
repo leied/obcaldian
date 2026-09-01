@@ -1,9 +1,9 @@
 {
-	"id": "obcaldian",
-	"name": "Obcaldian",
+	"id": "dailycalsync",
+	"name": "DailyCalSync",
 	"version": "0.1.0",
 	"minAppVersion": "1.11.4",
-	"description": "Generate daily notes from your own template, with a plugin-managed section synced to selected Google calendars.",
+	"description": "Sync multiple Google accounts and Secret iCalendar feeds into managed daily-note sections.",
 	"author": "lzccr",
 	"authorUrl": "",
 	"isDesktopOnly": true

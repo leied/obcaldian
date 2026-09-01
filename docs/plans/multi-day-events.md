@@ -53,7 +53,7 @@ calendars does not accidentally share checkbox state.
 For a multi-day event, `renderCalendarBlock` renders it on every day it spans, annotated, e.g.:
 
 ```
-- [ ] [Conference](link) (Day 2/3) <!-- obcaldian:event:abc123 -->
+- [ ] [Conference](link) (Day 2/3) <!-- dailycalsync:event:abc123 -->
 ```
 
 The trailing HTML comment is invisible in Obsidian's reading view but present in the raw
@@ -70,7 +70,7 @@ lines are byte-identical to today).
    days-in-range each group touches.
 3. **Scan phase:** for each multi-day group, read the *existing* content (if any) of every
    day in the event's full span—not just the requested range—and check whether its line (matched via the
-   `<!-- obcaldian:event:<id> -->` comment) is currently `- [x]`.
+   `<!-- dailycalsync:event:<id> -->` comment) is currently `- [x]`.
 4. **Decide phase:** apply the selected policy:
    - `independent` → preserve only the dates already checked.
    - `ask` + interactive sync → ask whether to mark the earliest checked date and following dates

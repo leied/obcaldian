@@ -1,6 +1,6 @@
 import { Notice, Plugin, TFile } from "obsidian";
-import { loadSettingsData, type ObcaldianSettings } from "./settings";
-import { ObcaldianSettingTab } from "./settingsTab";
+import { loadSettingsData, type DailyCalSyncSettings } from "./settings";
+import { DailyCalSyncSettingTab } from "./settingsTab";
 import {
 	MARKER_END,
 	MARKER_START,
@@ -18,13 +18,14 @@ import {
 	type SyncOptions,
 	type SyncUndoSnapshot,
 } from "./sync";
-import { isConnected, migrateLegacySecrets, type AuthDeps } from "./googleAuth";
+import { migrateLegacySecrets, type AuthDeps } from "./googleAuth";
 import { SyncDaysModal } from "./syncDaysModal";
 import { confirmMultiDayCompletion } from "./multiDayCompletionModal";
 import { confirmSyncPlan } from "./syncPreviewModal";
 import { SyncDateRangeModal } from "./syncDateRangeModal";
 import { RepairCalendarModal } from "./repairCalendarModal";
 import { copyRedactedDiagnostics } from "./diagnostics";
+import { OnboardingModal } from "./onboardingModal";
 
 type SyncBarState =
 	| { kind: "idle" }
@@ -32,8 +33,8 @@ type SyncBarState =
 	| { kind: "success"; at: number; dayCount: number }
 	| { kind: "error"; message: string };
 
-export default class ObcaldianPlugin extends Plugin {
-	settings!: ObcaldianSettings;
+export default class DailyCalSyncPlugin extends Plugin {
+	settings!: DailyCalSyncSettings;
 	private autoSyncIntervalId: number | null = null;
 	private statusBarItem!: HTMLElement;
 	private syncBarState: SyncBarState = { kind: "idle" };
@@ -42,11 +43,14 @@ export default class ObcaldianPlugin extends Plugin {
 	async onload() {
 		await this.loadSettings();
 		if (this.settings.useDailyNotesSettings) await this.syncDailyNotesSettings();
-		this.addSettingTab(new ObcaldianSettingTab(this.app, this));
+		this.addSettingTab(new DailyCalSyncSettingTab(this.app, this));
+		if (!this.settings.onboardingComplete) {
+			this.app.workspace.onLayoutReady(() => new OnboardingModal(this.app, this).open());
+		}
 		this.applyAutoSyncInterval();
 
 		this.statusBarItem = this.addStatusBarItem();
-		this.statusBarItem.addClass("obcaldian-status-bar-item");
+		this.statusBarItem.addClass("dailycalsync-status-bar-item");
 		this.statusBarItem.onClickEvent(() => {
 			void syncAll(this.app.vault, this.authDeps(), this.syncOptions());
 		});
@@ -79,7 +83,7 @@ export default class ObcaldianPlugin extends Plugin {
 
 		this.addCommand({
 			id: "sync-calendars",
-			name: "Sync Google calendars now",
+			name: "Sync calendars now",
 			callback: () => syncAll(this.app.vault, this.authDeps(), this.syncOptions()),
 		});
 
@@ -119,7 +123,7 @@ export default class ObcaldianPlugin extends Plugin {
 		this.addRibbonIcon("calendar-days", "Open tomorrow's daily note", () => {
 			void this.openDailyNote(1);
 		});
-		this.addRibbonIcon("refresh-cw", "Sync Google calendars now", () => {
+		this.addRibbonIcon("refresh-cw", "Sync calendars now", () => {
 			void syncAll(this.app.vault, this.authDeps(), this.syncOptions());
 		});
 		this.addRibbonIcon("calendar-range", "Sync upcoming days...", () => {
@@ -173,12 +177,12 @@ export default class ObcaldianPlugin extends Plugin {
 	private async syncCurrentNote(): Promise<void> {
 		const file = this.app.workspace.getActiveFile();
 		if (!(file instanceof TFile)) {
-			new Notice("Obcaldian: open a daily note first.");
+			new Notice("DailyCalSync: open a daily note first.");
 			return;
 		}
 		const date = window.moment(file.basename, this.settings.dailyNoteFormat, true);
 		if (!date.isValid() || notePathFor(this.settings, date) !== file.path) {
-			new Notice("Obcaldian: the active file does not match the configured daily note format.");
+			new Notice("DailyCalSync: the active file does not match the configured daily note format.");
 			return;
 		}
 		await syncDateRange(this.app.vault, this.authDeps(), date, date, {
@@ -190,19 +194,19 @@ export default class ObcaldianPlugin extends Plugin {
 	private async repairActiveCalendarSection(): Promise<void> {
 		const file = this.app.workspace.getActiveFile();
 		if (!(file instanceof TFile)) {
-			new Notice("Obcaldian: open the note that needs repair first.");
+			new Notice("DailyCalSync: open the note that needs repair first.");
 			return;
 		}
 		const original = await this.app.vault.read(file);
 		if (calendarSectionFromContent(original) !== null) {
-			new Notice("Obcaldian: this note already has a managed calendar section.");
+			new Notice("DailyCalSync: this note already has a managed calendar section.");
 			return;
 		}
 		new RepairCalendarModal(this.app, file, () => {
 			void (async () => {
 				const current = await this.app.vault.read(file);
 				if (current !== original) {
-					new Notice("Obcaldian: the note changed during preview; repair was cancelled.");
+					new Notice("DailyCalSync: the note changed during preview; repair was cancelled.");
 					return;
 				}
 				const separator = current.endsWith("\n") ? "\n" : "\n\n";
@@ -210,7 +214,7 @@ export default class ObcaldianPlugin extends Plugin {
 					file,
 					`${current}${separator}${MARKER_START}\n_(not yet synced)_\n${MARKER_END}\n`
 				);
-				new Notice("Obcaldian: calendar section markers inserted.");
+				new Notice("DailyCalSync: calendar section markers inserted.");
 			})();
 		}).open();
 	}
@@ -218,14 +222,17 @@ export default class ObcaldianPlugin extends Plugin {
 	async copyDiagnostics(): Promise<void> {
 		try {
 			await copyRedactedDiagnostics(this.manifest.version, this.settings);
-			new Notice("Obcaldian: redacted diagnostics copied.");
+			new Notice("DailyCalSync: redacted diagnostics copied.");
 		} catch (error) {
-			new Notice(`Obcaldian: could not copy diagnostics — ${(error as Error).message}`);
+			new Notice(`DailyCalSync: could not copy diagnostics — ${(error as Error).message}`);
 		}
 	}
 
 	private quietCatchUp(): void {
-		if (!isConnected(this.authDeps()) || !this.settings.calendars.some((cal) => cal.enabled)) {
+		const hasEnabledSource =
+			this.settings.googleAccounts.some((account) => account.calendars.some((calendar) => calendar.enabled)) ||
+			this.settings.iCalCalendars.some((calendar) => calendar.enabled);
+		if (!hasEnabledSource) {
 			return;
 		}
 		const staleAfterMinutes = this.settings.autoSyncIntervalMinutes || 180;
@@ -234,11 +241,12 @@ export default class ObcaldianPlugin extends Plugin {
 		void autoSyncTick(this.app.vault, this.authDeps(), this.syncOptions());
 	}
 
-	authDeps(): AuthDeps {
+	authDeps(accountId?: string): AuthDeps {
 		return {
 			settings: this.settings,
 			saveSettings: () => this.saveSettings(),
 			secretStorage: this.app.secretStorage,
+			accountId,
 			rollbackCreatedFile: (file) => this.app.fileManager.trashFile(file),
 		};
 	}
@@ -288,13 +296,13 @@ export default class ObcaldianPlugin extends Plugin {
 
 	private async undoLastSync(): Promise<void> {
 		if (!this.lastSyncSnapshot) {
-			new Notice("Obcaldian: there is no calendar sync to undo in this session.");
+			new Notice("DailyCalSync: there is no calendar sync to undo in this session.");
 			return;
 		}
 		const result = await undoSyncSnapshot(this.app.vault, this.lastSyncSnapshot);
 		this.lastSyncSnapshot = null;
 		new Notice(
-			`Obcaldian: restored ${result.restored} calendar section${result.restored === 1 ? "" : "s"}${result.skipped ? `; skipped ${result.skipped} changed note${result.skipped === 1 ? "" : "s"}` : ""}.`
+			`DailyCalSync: restored ${result.restored} calendar section${result.restored === 1 ? "" : "s"}${result.skipped ? `; skipped ${result.skipped} changed note${result.skipped === 1 ? "" : "s"}` : ""}.`
 		);
 	}
 
@@ -306,19 +314,19 @@ export default class ObcaldianPlugin extends Plugin {
 			return;
 		}
 		if (state.kind === "syncing") {
-			this.statusBarItem.setText("Obcaldian: syncing…");
-			this.statusBarItem.setAttr("aria-label", "Syncing Google calendars…");
+			this.statusBarItem.setText("DailyCalSync: syncing…");
+			this.statusBarItem.setAttr("aria-label", "Syncing calendars…");
 			return;
 		}
 		if (state.kind === "success") {
-			this.statusBarItem.setText(`Obcaldian: synced ${window.moment(state.at).fromNow()}`);
+			this.statusBarItem.setText(`DailyCalSync: synced ${window.moment(state.at).fromNow()}`);
 			this.statusBarItem.setAttr(
 				"aria-label",
 				`Synced ${state.dayCount} day${state.dayCount === 1 ? "" : "s"} ahead. Click to sync now.`
 			);
 			return;
 		}
-		this.statusBarItem.setText("Obcaldian: sync failed");
+		this.statusBarItem.setText("DailyCalSync: sync failed");
 		this.statusBarItem.setAttr("aria-label", `${state.message}. Click to retry.`);
 	}
 
@@ -335,7 +343,7 @@ export default class ObcaldianPlugin extends Plugin {
 			}
 			await this.app.workspace.getLeaf(false).openFile(file);
 		} catch (error) {
-			new Notice(`Obcaldian: ${(error as Error).message}`);
+			new Notice(`DailyCalSync: ${(error as Error).message}`);
 		}
 	}
 

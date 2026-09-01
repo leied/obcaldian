@@ -16,7 +16,7 @@ export class RepairCalendarModal extends Modal {
 			text: `Append a new managed calendar section to ${this.file.path}? Existing note content will not be changed.`,
 		});
 		this.contentEl.createEl("pre", {
-			text: "<!-- obcaldian:calendar:start -->\n_(not yet synced)_\n<!-- obcaldian:calendar:end -->",
+			text: "<!-- dailycalsync:calendar:start -->\n_(not yet synced)_\n<!-- dailycalsync:calendar:end -->",
 		});
 		new Setting(this.contentEl)
 			.addButton((button) => button.setButtonText("Cancel").onClick(() => this.close()))

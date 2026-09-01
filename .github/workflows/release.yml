@@ -28,9 +28,9 @@ jobs:
 
       - name: Package plugin files
         run: |
-          mkdir obcaldian
-          cp main.js manifest.json styles.css obcaldian
-          zip -r obcaldian.zip obcaldian
+          mkdir dailycalsync
+          cp main.js manifest.json styles.css dailycalsync
+          zip -r dailycalsync.zip dailycalsync
 
       - name: Attest release artifacts
         uses: actions/attest@v4
@@ -39,7 +39,7 @@ jobs:
             main.js
             manifest.json
             styles.css
-            obcaldian.zip
+            dailycalsync.zip
 
       - name: Publish release
         env:
@@ -50,4 +50,4 @@ jobs:
             --title "$TAG" \
             --generate-notes \
             --draft \
-            main.js manifest.json styles.css obcaldian.zip
+            main.js manifest.json styles.css dailycalsync.zip

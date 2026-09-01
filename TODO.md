@@ -1,14 +1,13 @@
-# Obcaldian roadmap
+# DailyCalSync roadmap
 
 This file collects the recommended follow-up work from the initial project review. Items are
 ordered roughly by user impact and release risk, not by implementation difficulty.
 
 ## Before public-directory submission
 
-- [ ] Decide whether to rename **Obcaldian**. Current Obsidian directory validation discourages
-  plugin names ending in `dian`, so the name may block publication even though the manifest ID is
-  otherwise valid. If renamed, update `manifest.json`, `package.json`, README copy, OAuth-facing
-  copy, release assets, and the eventual community-directory entry together.
+- [x] Rename the plugin to **DailyCalSync**, including the manifest ID, package metadata,
+  user-facing copy, CSS classes, release assets, and compatibility readers for legacy markers and
+  SecretStorage keys.
 - [ ] Run a beta release through BRAT and exercise OAuth, token refresh, calendar pagination,
   background checks, ribbon actions, and sync against a disposable real vault on each supported
   desktop platform.
@@ -59,12 +58,14 @@ ordered roughly by user impact and release risk, not by implementation difficult
 
 - [x] Add a setting to choose between creating missing future notes and updating existing notes
   only.
+- [x] Add first-run guided onboarding with privacy context, Daily Notes/manual configuration,
+  Google/iCalendar source choices, a readiness checklist, and a rerun action in settings.
 - [x] Add filters for declined and cancelled events.
 - [x] Add rendering controls for all-day grouping, descriptions, attendees, location, meeting
   links, and calendar ordering.
 - [x] Escape and normalize calendar names and event content before writing Markdown. Protect link
   syntax and footnotes, validate outbound event URLs, and prevent event text from containing or
-  imitating Obcaldian's internal section markers.
+  imitating DailyCalSync's internal section markers.
 - [x] Add privacy-aware event rendering: recognize Google event visibility, optionally redact
   private events to a neutral `Busy` label, and allow attendee email addresses to be excluded from
   persisted Markdown.
@@ -84,7 +85,7 @@ ordered roughly by user impact and release risk, not by implementation difficult
 - [x] Add **Sync date range...** with past and future dates, a maximum-range safeguard, preview, and
   support for update-existing-only mode.
 - [x] Add **Sync calendar for this note** by resolving the active daily note's date from the active
-  Daily Notes or Obcaldian filename configuration.
+  Daily Notes or DailyCalSync filename configuration.
 - [x] Replace the creation-time heuristic with an explicit `{ file, created }` result from daily-note
   creation so an existing but recently created file is never mistaken for a new note.
 - [ ] Consider configurable commands/ribbon visibility if four default ribbon actions feel crowded
@@ -102,6 +103,9 @@ ordered roughly by user impact and release risk, not by implementation difficult
   to documented defaults, validate nested state, and test upgrades from each released schema.
 - [x] Test compatibility against both the declared minimum Obsidian version and the current API so
   development against `obsidian: latest` cannot silently introduce an unsupported API dependency.
+- [x] Upgrade the development-only Vitest/Vite and esbuild toolchain after the 2026-08-31 audit
+  reported seven toolchain advisories. Vitest 4.1.11 and esbuild 0.28.2 reduce the follow-up audit
+  to zero known vulnerabilities.
 
 ## OAuth experience
 
@@ -115,7 +119,8 @@ ordered roughly by user impact and release risk, not by implementation difficult
   only, with no analytics, telemetry, proxy, or publisher-controlled endpoint.
 - [x] Reject publisher-managed OAuth as a project direction. Even without a hosted callback, it
   centralizes application identity, consent, quota, and trust under the publisher's Google project.
-- [ ] Evaluate a per-calendar Secret iCal URL mode as a limited read-only/no-OAuth alternative.
+- [x] Add a per-calendar Secret iCal URL mode as a limited read-only/no-OAuth alternative, keeping
+  URLs in SecretStorage and enforcing HTTPS, size, recurrence-expansion, and range safeguards.
 - [x] Add an OAuth `state` nonce, callback timeout/cancellation, and guaranteed loopback-server
   cleanup.
 - [x] Recognize revoked or expired refresh tokens and guide the user directly to reconnect.
@@ -124,7 +129,7 @@ ordered roughly by user impact and release risk, not by implementation difficult
 
 ## Later product ideas
 
-- [ ] Support multiple isolated Google account profiles, each with its own user-owned OAuth
+- [x] Support multiple isolated Google account profiles, each with its own user-owned OAuth
   credentials, tokens, calendars, health state, and revocation boundary.
 - [ ] Optionally generate a weekly or rolling seven-day calendar overview using the shared event
   cache and renderer while keeping daily notes and event completion state authoritative.

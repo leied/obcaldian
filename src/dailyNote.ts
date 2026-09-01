@@ -3,7 +3,7 @@ import type { Moment } from "moment";
 import {
 	DEFAULT_RENDERING_SETTINGS,
 	type CalendarConfig,
-	type ObcaldianSettings,
+	type DailyCalSyncSettings,
 	type RenderingSettings,
 } from "./settings";
 import type { GoogleEvent } from "./googleCalendar";
@@ -16,9 +16,11 @@ import {
 } from "./multiDay";
 
 const CALENDAR_TOKEN = "{calendar}";
-export const MARKER_START = "<!-- obcaldian:calendar:start -->";
-export const MARKER_END = "<!-- obcaldian:calendar:end -->";
-const PLACEHOLDER_BODY = "_(not yet synced — click \"Sync now\" in Obcaldian settings)_";
+export const MARKER_START = "<!-- dailycalsync:calendar:start -->";
+export const MARKER_END = "<!-- dailycalsync:calendar:end -->";
+const LEGACY_MARKER_START = "<!-- obcaldian:calendar:start -->";
+const LEGACY_MARKER_END = "<!-- obcaldian:calendar:end -->";
+const PLACEHOLDER_BODY = "_(not yet synced — click \"Sync now\" in DailyCalSync settings)_";
 
 export interface EnsuredDailyNote {
 	file: TFile;
@@ -40,7 +42,7 @@ export function fileNameFor(date: Moment, format = "YYYYMMDD"): string {
 	return `${date.format(format)}.md`;
 }
 
-export function notePathFor(settings: ObcaldianSettings, date: Moment): string {
+export function notePathFor(settings: DailyCalSyncSettings, date: Moment): string {
 	const folder = settings.dailyNoteFolder?.trim();
 	const fileName = fileNameFor(date, settings.dailyNoteFormat);
 	return normalizePath(folder ? `${folder}/${fileName}` : fileName);
@@ -52,7 +54,7 @@ export function notePathFor(settings: ObcaldianSettings, date: Moment): string {
  */
 export async function ensureDailyNote(
 	vault: Vault,
-	settings: ObcaldianSettings,
+	settings: DailyCalSyncSettings,
 	date: Moment
 ): Promise<TFile> {
 	const path = notePathFor(settings, date);
@@ -73,10 +75,10 @@ export async function ensureDailyNote(
 
 export async function renderNewDailyNoteContent(
 	vault: Vault,
-	settings: ObcaldianSettings,
+	settings: DailyCalSyncSettings,
 	date: Moment
 ): Promise<string> {
-	if (!settings.templatePath) throw new Error("Set a template file in Obcaldian settings first.");
+	if (!settings.templatePath) throw new Error("Set a template file in DailyCalSync settings first.");
 	const templateFile = vault.getAbstractFileByPath(normalizePath(settings.templatePath));
 	if (!(templateFile instanceof TFile)) {
 		throw new Error(`Template file not found: ${settings.templatePath}`);
@@ -95,7 +97,7 @@ export async function renderNewDailyNoteContent(
 /** Explicit creation result for callers that need to distinguish an existing note safely. */
 export async function ensureDailyNoteResult(
 	vault: Vault,
-	settings: ObcaldianSettings,
+	settings: DailyCalSyncSettings,
 	date: Moment
 ): Promise<EnsuredDailyNote> {
 	const path = notePathFor(settings, date);
@@ -105,21 +107,36 @@ export async function ensureDailyNoteResult(
 }
 
 export function calendarSectionFromContent(content: string): string | null {
-	const startIndex = content.indexOf(MARKER_START);
-	const endIndex =
-		startIndex === -1 ? -1 : content.indexOf(MARKER_END, startIndex + MARKER_START.length);
-	if (startIndex === -1 || endIndex === -1) return null;
-	return content.slice(startIndex + MARKER_START.length, endIndex).replace(/^\n|\n$/g, "");
+	const range = markerRange(content);
+	if (!range) return null;
+	return content.slice(range.bodyStart, range.endIndex).replace(/^\n|\n$/g, "");
 }
 
 export function replaceCalendarSectionContent(content: string, renderedBlock: string): string | null {
-	const startIndex = content.indexOf(MARKER_START);
-	const endIndex =
-		startIndex === -1 ? -1 : content.indexOf(MARKER_END, startIndex + MARKER_START.length);
-	if (startIndex === -1 || endIndex === -1) return null;
-	const before = content.slice(0, startIndex);
-	const after = content.slice(endIndex + MARKER_END.length);
+	const range = markerRange(content);
+	if (!range) return null;
+	const before = content.slice(0, range.startIndex);
+	const after = content.slice(range.endIndex + range.endMarker.length);
 	return `${before}${markerBlock(renderedBlock)}${after}`;
+}
+
+function markerRange(content: string): {
+	startIndex: number;
+	bodyStart: number;
+	endIndex: number;
+	endMarker: string;
+} | null {
+	for (const [startMarker, endMarker] of [
+		[MARKER_START, MARKER_END],
+		[LEGACY_MARKER_START, LEGACY_MARKER_END],
+	] as const) {
+		const startIndex = content.indexOf(startMarker);
+		const endIndex = startIndex === -1 ? -1 : content.indexOf(endMarker, startIndex + startMarker.length);
+		if (startIndex !== -1 && endIndex !== -1) {
+			return { startIndex, bodyStart: startIndex + startMarker.length, endIndex, endMarker };
+		}
+	}
+	return null;
 }
 
 /** Reads checkbox state and explicitly attached inline/indented user annotations. */
@@ -131,7 +148,8 @@ export function extractPreservedEvents(content: string): Map<string, PreservedEv
 		const line = lines[index];
 		const eventKey = eventKeyFromMarkerLine(line);
 		if (!eventKey) continue;
-		const markerEnd = line.indexOf(" -->", line.indexOf("<!-- obcaldian:event:"));
+		const markerStart = line.search(/<!-- (?:dailycalsync|obcaldian):event:/);
+		const markerEnd = markerStart === -1 ? -1 : line.indexOf(" -->", markerStart);
 		const inlineAnnotation = markerEnd === -1 ? "" : line.slice(markerEnd + 4).trim();
 		const nestedAnnotations: string[] = [];
 		for (let next = index + 1; next < lines.length; next += 1) {
@@ -205,7 +223,7 @@ function calendarClass(calendarId: string): string {
 		hash ^= calendarId.charCodeAt(index);
 		hash = Math.imul(hash, 16_777_619);
 	}
-	return `obcaldian-calendar-${(hash >>> 0).toString(36)}`;
+	return `dailycalsync-calendar-${(hash >>> 0).toString(36)}`;
 }
 
 export function eventIsIncluded(event: GoogleEvent, rendering: RenderingSettings): boolean {
@@ -325,9 +343,9 @@ export function renderCalendarBlock(
 				);
 			});
 		if (events.length === 0) continue;
-		const classes = ["obcaldian-calendar-label", calendarClass(cal.id)];
+		const classes = ["dailycalsync-calendar-label", calendarClass(cal.id)];
 		if (rendering.useGoogleCalendarColors && cal.colorId && /^\d{1,2}$/.test(cal.colorId)) {
-			classes.push(`obcaldian-calendar-color-${cal.colorId}`);
+			classes.push(`dailycalsync-calendar-color-${cal.colorId}`);
 		}
 		lines.push(`<span class="${classes.join(" ")}"></span> **${safeInlineText(cal.summary)}**`);
 		for (const ev of events) {
@@ -355,8 +373,8 @@ export function renderCalendarBlock(
 			const body = rendering.redactPrivateEvents && isPrivate ? null : footnoteBody(ev, rendering);
 			if (body) {
 				footnoteCount += 1;
-				footnoteMarker = `[^obcaldian-${footnoteCount}]`;
-				footnotes.push(`[^obcaldian-${footnoteCount}]: ${body}`);
+				footnoteMarker = `[^dailycalsync-${footnoteCount}]`;
+				footnotes.push(`[^dailycalsync-${footnoteCount}]: ${body}`);
 			}
 
 			const annotation = previous?.inlineAnnotation
@@ -404,7 +422,7 @@ export async function syncNoteCalendarSection(
 	const next = replaceCalendarSectionContent(content, renderedBlock);
 	if (next === null) {
 		if (notify) {
-			new Notice(`Obcaldian: calendar markers not found in ${file.path}, skipping.`);
+			new Notice(`DailyCalSync: calendar markers not found in ${file.path}, skipping.`);
 		}
 		return false;
 	}

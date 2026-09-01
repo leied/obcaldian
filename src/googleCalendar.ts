@@ -1,6 +1,6 @@
 import type { Moment } from "moment";
 import type { AuthDeps } from "./googleAuth";
-import { getValidAccessToken } from "./googleAuth";
+import { getValidAccessToken, googleAccount } from "./googleAuth";
 import { googleRequest } from "./network";
 import { GoogleHttpError } from "./network";
 import { zonedDayRange } from "./timezone";
@@ -162,7 +162,7 @@ function storedEvent(value: Record<string, unknown>): GoogleEvent | null {
 }
 
 export function calendarCacheEvents(deps: AuthDeps, calendarId: string): GoogleEvent[] {
-	const cache = deps.settings.calendarCaches[calendarId];
+	const cache = googleAccount(deps).calendarCaches[calendarId];
 	if (!cache) return [];
 	return Object.values(cache.events).flatMap((value) => {
 		const event = storedEvent(value);
@@ -221,7 +221,7 @@ async function fullCalendarSync(
 	if (!result.nextSyncToken) throw new Error("Google did not return an incremental sync token.");
 	const events: Record<string, Record<string, unknown>> = {};
 	for (const event of result.items) mergeEventChange(events, event);
-	deps.settings.calendarCaches[calendarId] = {
+	googleAccount(deps).calendarCaches[calendarId] = {
 		syncToken: result.nextSyncToken,
 		coverageStart: coverageStart.toISOString(),
 		updatedAt: Date.now(),
@@ -236,7 +236,8 @@ export async function refreshCalendarCache(
 	calendarId: string,
 	requiredStart: Date
 ): Promise<GoogleEvent[]> {
-	const cache = deps.settings.calendarCaches[calendarId];
+	const account = googleAccount(deps);
+	const cache = account.calendarCaches[calendarId];
 	if (!cache || Date.parse(cache.coverageStart) > requiredStart.getTime()) {
 		return fullCalendarSync(deps, calendarId, requiredStart);
 	}
@@ -263,7 +264,7 @@ export async function refreshCalendarCache(
 		return calendarCacheEvents(deps, calendarId);
 	} catch (error) {
 		if (error instanceof GoogleHttpError && error.status === 410) {
-			delete deps.settings.calendarCaches[calendarId];
+			delete account.calendarCaches[calendarId];
 			return fullCalendarSync(deps, calendarId, requiredStart);
 		}
 		throw error;

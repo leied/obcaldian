@@ -10,7 +10,8 @@ import {
 } from "../src/googleCalendar";
 import { DEFAULT_SETTINGS } from "../src/settings";
 
-vi.mock("../src/googleAuth", () => ({
+vi.mock("../src/googleAuth", async (importOriginal) => ({
+	...(await importOriginal<typeof import("../src/googleAuth")>()),
 	getValidAccessToken: vi.fn(async () => "access-token"),
 }));
 
@@ -20,16 +21,25 @@ vi.mock("obsidian", async (importOriginal) => ({
 }));
 
 function deps(): AuthDeps {
+	const account = {
+		id: "account-one",
+		name: "Account one",
+		clientId: "client",
+		projectId: "project",
+		calendars: [],
+		calendarCaches: {},
+		calendarHealth: {},
+	};
 	return {
 		settings: {
 			...DEFAULT_SETTINGS,
 			timezone: "UTC",
-			calendarCaches: {},
-			calendarHealth: {},
+			googleAccounts: [account],
 			rendering: { ...DEFAULT_SETTINGS.rendering },
 		},
 		saveSettings: async () => {},
 		secretStorage: new SecretStorage(),
+		accountId: account.id,
 	};
 }
 
@@ -76,13 +86,13 @@ describe("incremental calendar cache", () => {
 		const events = await refreshCalendarCache(auth, "work", new Date("2026-07-10T00:00:00Z"));
 
 		expect(events[0].summary).toBe("Updated");
-		expect(auth.settings.calendarCaches.work.syncToken).toBe("token-2");
+		expect(auth.settings.googleAccounts[0].calendarCaches.work.syncToken).toBe("token-2");
 		expect(vi.mocked(requestUrl).mock.calls[1][0].url).toContain("syncToken=token-1");
 	});
 
 	it("rebuilds after Google invalidates a sync token", async () => {
 		const auth = deps();
-		auth.settings.calendarCaches.work = {
+		auth.settings.googleAccounts[0].calendarCaches.work = {
 			syncToken: "expired",
 			coverageStart: "2026-07-01T00:00:00.000Z",
 			updatedAt: Date.now(),
@@ -97,7 +107,7 @@ describe("incremental calendar cache", () => {
 			} as never);
 
 		await refreshCalendarCache(auth, "work", new Date("2026-07-10T00:00:00Z"));
-		expect(auth.settings.calendarCaches.work.syncToken).toBe("replacement");
+		expect(auth.settings.googleAccounts[0].calendarCaches.work.syncToken).toBe("replacement");
 		expect(vi.mocked(requestUrl).mock.calls[1][0].url).toContain("timeMin=");
 	});
 

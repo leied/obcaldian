@@ -1,4 +1,5 @@
-export const SETTINGS_SCHEMA_VERSION = 5;
+export const SETTINGS_SCHEMA_VERSION = 6;
+export const LEGACY_GOOGLE_ACCOUNT_ID = "default-google";
 
 export type AddAsStyle = "checkbox" | "bullet";
 export type MultiDayCompletionBehavior = "independent" | "ask" | "following";
@@ -6,9 +7,7 @@ export type NoteCreationMode = "create-missing" | "existing-only";
 export type HourCycleSetting = "system" | "12" | "24";
 
 export interface MultiDayCompletionRule {
-	/** First YYYY-MM-DD occurrence that should render checked. Earlier days stay unchanged. */
 	completedFrom: string;
-	/** Inclusive YYYY-MM-DD final occurrence, used to expire old rules. */
 	eventEnd: string;
 }
 
@@ -17,9 +16,7 @@ export interface CalendarConfig {
 	summary: string;
 	enabled: boolean;
 	addAs: AddAsStyle;
-	/** Optional CSS color supplied by Google or chosen by the user. */
 	color?: string;
-	/** Google Calendar color palette identifier, rendered through a stable CSS class. */
 	colorId?: string;
 }
 
@@ -28,6 +25,7 @@ export type SyncFailureCategory =
 	| "quota"
 	| "network"
 	| "google"
+	| "ical"
 	| "template"
 	| "markers"
 	| "vault"
@@ -37,17 +35,37 @@ export interface CalendarHealth {
 	lastSuccessAt?: number;
 	lastFailureAt?: number;
 	lastFailureCategory?: SyncFailureCategory;
-	/** Redacted, user-actionable summary. Never persist event data or identifiers here. */
 	lastFailureMessage?: string;
 }
 
 export interface CalendarEventCache {
 	syncToken: string;
-	/** Earliest instant included by the most recent full sync. */
 	coverageStart: string;
 	updatedAt: number;
-	/** Raw Google Event resources, validated again before use. */
 	events: Record<string, Record<string, unknown>>;
+}
+
+export interface ICalEventCache {
+	updatedAt: number;
+	etag?: string;
+	lastModified?: string;
+	events: Record<string, Record<string, unknown>>;
+}
+
+export interface GoogleAccountProfile {
+	id: string;
+	name: string;
+	clientId: string;
+	projectId: string;
+	tokenExpiresAt?: number;
+	calendars: CalendarConfig[];
+	calendarHealth: Record<string, CalendarHealth>;
+	calendarCaches: Record<string, CalendarEventCache>;
+}
+
+export interface ICalCalendarConfig extends CalendarConfig {
+	/** Secret feed URLs live in Obsidian SecretStorage under this local identifier. */
+	id: string;
 }
 
 export interface RecentSyncFailure {
@@ -78,34 +96,21 @@ export interface RenderingSettings {
 	useGoogleCalendarColors: boolean;
 }
 
-export interface ObcaldianSettings {
+export interface DailyCalSyncSettings {
 	schemaVersion: number;
-	googleClientId: string;
-	googleProjectId: string;
-	/**
-	 * Epoch ms the current Google access token expires at. The access/refresh
-	 * token strings themselves, and the client secret, live in Obsidian's
-	 * secret storage (see googleAuth.ts) rather than here, since this object
-	 * is persisted to plugin data.json in plain text.
-	 */
-	tokenExpiresAt?: number;
-	calendars: CalendarConfig[];
-	calendarHealth: Record<string, CalendarHealth>;
-	calendarCaches: Record<string, CalendarEventCache>;
+	onboardingComplete: boolean;
+	googleAccounts: GoogleAccountProfile[];
+	iCalCalendars: ICalCalendarConfig[];
+	iCalCaches: Record<string, ICalEventCache>;
 	dailyNoteFolder: string;
 	templatePath: string;
 	useDailyNotesSettings: boolean;
 	dailyNoteFormat: string;
 	noteCreationMode: NoteCreationMode;
-	/** IANA time zone used to align calendar sync day boundaries with Google. */
 	timezone: string;
-	/** Default number of days beyond today that a sync covers. */
 	syncDaysAhead: number;
-	/** Minutes between automatic background syncs. 0 disables auto-sync. */
 	autoSyncIntervalMinutes: number;
-	/** How checking one occurrence of a multi-day event affects later occurrences. */
 	multiDayCompletionBehavior: MultiDayCompletionBehavior;
-	/** Persisted propagation rules ensure not-yet-synced dates are handled later. */
 	multiDayCompletionRules: Record<string, MultiDayCompletionRule>;
 	rendering: RenderingSettings;
 	lastSuccessfulSyncAt?: number;
@@ -142,14 +147,12 @@ export const DEFAULT_RENDERING_SETTINGS: RenderingSettings = {
 	useGoogleCalendarColors: true,
 };
 
-export const DEFAULT_SETTINGS: ObcaldianSettings = {
+export const DEFAULT_SETTINGS: DailyCalSyncSettings = {
 	schemaVersion: SETTINGS_SCHEMA_VERSION,
-	googleClientId: "",
-	googleProjectId: "",
-	tokenExpiresAt: undefined,
-	calendars: [],
-	calendarHealth: {},
-	calendarCaches: {},
+	onboardingComplete: false,
+	googleAccounts: [],
+	iCalCalendars: [],
+	iCalCaches: {},
 	dailyNoteFolder: "",
 	templatePath: "",
 	useDailyNotesSettings: false,
@@ -157,7 +160,6 @@ export const DEFAULT_SETTINGS: ObcaldianSettings = {
 	noteCreationMode: "create-missing",
 	timezone: detectSystemTimezone(),
 	syncDaysAhead: 1,
-	// Keep new installations reasonably fresh without polling Google aggressively.
 	autoSyncIntervalMinutes: 180,
 	multiDayCompletionBehavior: "ask",
 	multiDayCompletionRules: {},
@@ -198,46 +200,27 @@ function validDateKey(value: unknown): value is string {
 	return typeof value === "string" && /^\d{4}-\d{2}-\d{2}$/.test(value);
 }
 
+function validLocalId(value: unknown): value is string {
+	return typeof value === "string" && /^[a-z0-9][a-z0-9-]{0,63}$/.test(value);
+}
+
 function normalizeCalendars(value: unknown): CalendarConfig[] {
 	if (!Array.isArray(value)) return [];
 	const seen = new Set<string>();
 	const calendars: CalendarConfig[] = [];
 	for (const entry of value) {
-		if (!isRecord(entry) || typeof entry.id !== "string" || !entry.id || seen.has(entry.id)) {
-			continue;
-		}
+		if (!isRecord(entry) || typeof entry.id !== "string" || !entry.id || seen.has(entry.id)) continue;
 		seen.add(entry.id);
 		calendars.push({
 			id: entry.id,
-			summary: stringValue(entry.summary, "(unnamed calendar)"),
+			summary: stringValue(entry.summary, "(unnamed calendar)").slice(0, 200),
 			enabled: booleanValue(entry.enabled, false),
 			addAs: oneOf(entry.addAs, ["checkbox", "bullet"] as const, "checkbox"),
-			...(typeof entry.color === "string" && /^#[0-9a-f]{6}$/i.test(entry.color)
-				? { color: entry.color }
-				: {}),
-			...(typeof entry.colorId === "string" && /^\d{1,2}$/.test(entry.colorId)
-				? { colorId: entry.colorId }
-				: {}),
+			...(typeof entry.color === "string" && /^#[0-9a-f]{6}$/i.test(entry.color) ? { color: entry.color } : {}),
+			...(typeof entry.colorId === "string" && /^\d{1,2}$/.test(entry.colorId) ? { colorId: entry.colorId } : {}),
 		});
 	}
 	return calendars;
-}
-
-function normalizeRules(value: unknown): Record<string, MultiDayCompletionRule> {
-	if (!isRecord(value)) return {};
-	const rules: Record<string, MultiDayCompletionRule> = {};
-	for (const [key, rule] of Object.entries(value)) {
-		if (
-			key &&
-			isRecord(rule) &&
-			validDateKey(rule.completedFrom) &&
-			validDateKey(rule.eventEnd) &&
-			rule.completedFrom <= rule.eventEnd
-		) {
-			rules[key] = { completedFrom: rule.completedFrom, eventEnd: rule.eventEnd };
-		}
-	}
-	return rules;
 }
 
 function normalizeHealth(value: unknown): Record<string, CalendarHealth> {
@@ -245,18 +228,12 @@ function normalizeHealth(value: unknown): Record<string, CalendarHealth> {
 	const health: Record<string, CalendarHealth> = {};
 	for (const [calendarId, item] of Object.entries(value)) {
 		if (!calendarId || !isRecord(item)) continue;
-		const category = oneOf(
-			item.lastFailureCategory,
-			["auth", "quota", "network", "google", "template", "markers", "vault", "unknown"] as const,
-			"unknown"
-		);
+		const category = oneOf(item.lastFailureCategory, ["auth", "quota", "network", "google", "ical", "template", "markers", "vault", "unknown"] as const, "unknown");
 		health[calendarId] = {
 			lastSuccessAt: optionalTimestamp(item.lastSuccessAt),
 			lastFailureAt: optionalTimestamp(item.lastFailureAt),
 			...(item.lastFailureCategory ? { lastFailureCategory: category } : {}),
-			...(typeof item.lastFailureMessage === "string"
-				? { lastFailureMessage: item.lastFailureMessage.slice(0, 300) }
-				: {}),
+			...(typeof item.lastFailureMessage === "string" ? { lastFailureMessage: item.lastFailureMessage.slice(0, 300) } : {}),
 		};
 	}
 	return health;
@@ -266,21 +243,9 @@ function normalizeCaches(value: unknown): Record<string, CalendarEventCache> {
 	if (!isRecord(value)) return {};
 	const caches: Record<string, CalendarEventCache> = {};
 	for (const [calendarId, item] of Object.entries(value)) {
-		if (
-			!calendarId ||
-			!isRecord(item) ||
-			typeof item.syncToken !== "string" ||
-			!item.syncToken ||
-			typeof item.coverageStart !== "string" ||
-			!Number.isFinite(Date.parse(item.coverageStart)) ||
-			!isRecord(item.events)
-		) {
-			continue;
-		}
+		if (!calendarId || !isRecord(item) || typeof item.syncToken !== "string" || !item.syncToken || typeof item.coverageStart !== "string" || !Number.isFinite(Date.parse(item.coverageStart)) || !isRecord(item.events)) continue;
 		const events: Record<string, Record<string, unknown>> = {};
-		for (const [eventKey, event] of Object.entries(item.events)) {
-			if (eventKey && isRecord(event)) events[eventKey] = event;
-		}
+		for (const [eventKey, event] of Object.entries(item.events)) if (eventKey && isRecord(event)) events[eventKey] = event;
 		caches[calendarId] = {
 			syncToken: item.syncToken,
 			coverageStart: item.coverageStart,
@@ -291,23 +256,78 @@ function normalizeCaches(value: unknown): Record<string, CalendarEventCache> {
 	return caches;
 }
 
+function normalizeICalCaches(value: unknown): Record<string, ICalEventCache> {
+	if (!isRecord(value)) return {};
+	const caches: Record<string, ICalEventCache> = {};
+	for (const [calendarId, item] of Object.entries(value)) {
+		if (!validLocalId(calendarId) || !isRecord(item) || !isRecord(item.events)) continue;
+		const events: Record<string, Record<string, unknown>> = {};
+		for (const [eventKey, event] of Object.entries(item.events)) if (eventKey && isRecord(event)) events[eventKey] = event;
+		caches[calendarId] = {
+			updatedAt: optionalTimestamp(item.updatedAt) ?? Date.now(),
+			...(typeof item.etag === "string" ? { etag: item.etag.slice(0, 500) } : {}),
+			...(typeof item.lastModified === "string" ? { lastModified: item.lastModified.slice(0, 200) } : {}),
+			events,
+		};
+	}
+	return caches;
+}
+
+function normalizeGoogleAccounts(value: unknown): GoogleAccountProfile[] {
+	if (!Array.isArray(value)) return [];
+	const seen = new Set<string>();
+	const accounts: GoogleAccountProfile[] = [];
+	for (const entry of value) {
+		if (!isRecord(entry) || !validLocalId(entry.id) || seen.has(entry.id)) continue;
+		seen.add(entry.id);
+		accounts.push({
+			id: entry.id,
+			name: stringValue(entry.name, "Google account").trim().slice(0, 100) || "Google account",
+			clientId: stringValue(entry.clientId, "").trim(),
+			projectId: stringValue(entry.projectId, "").trim(),
+			tokenExpiresAt: optionalTimestamp(entry.tokenExpiresAt),
+			calendars: normalizeCalendars(entry.calendars),
+			calendarHealth: normalizeHealth(entry.calendarHealth),
+			calendarCaches: normalizeCaches(entry.calendarCaches),
+		});
+	}
+	return accounts;
+}
+
+function normalizeICalCalendars(value: unknown): ICalCalendarConfig[] {
+	if (!Array.isArray(value)) return [];
+	const seen = new Set<string>();
+	const calendars: ICalCalendarConfig[] = [];
+	for (const entry of value) {
+		if (!isRecord(entry) || !validLocalId(entry.id) || seen.has(entry.id)) continue;
+		seen.add(entry.id);
+		calendars.push({
+			id: entry.id,
+			summary: stringValue(entry.summary, "iCalendar feed").trim().slice(0, 200) || "iCalendar feed",
+			enabled: booleanValue(entry.enabled, true),
+			addAs: oneOf(entry.addAs, ["checkbox", "bullet"] as const, "checkbox"),
+			...(typeof entry.color === "string" && /^#[0-9a-f]{6}$/i.test(entry.color) ? { color: entry.color } : {}),
+		});
+	}
+	return calendars;
+}
+
+function normalizeRules(value: unknown): Record<string, MultiDayCompletionRule> {
+	if (!isRecord(value)) return {};
+	const rules: Record<string, MultiDayCompletionRule> = {};
+	for (const [key, rule] of Object.entries(value)) {
+		if (key && isRecord(rule) && validDateKey(rule.completedFrom) && validDateKey(rule.eventEnd) && rule.completedFrom <= rule.eventEnd) rules[key] = { completedFrom: rule.completedFrom, eventEnd: rule.eventEnd };
+	}
+	return rules;
+}
+
 function normalizeRecentFailures(value: unknown): RecentSyncFailure[] {
 	if (!Array.isArray(value)) return [];
 	return value.flatMap((item) => {
 		if (!isRecord(item) || typeof item.message !== "string") return [];
 		const at = optionalTimestamp(item.at);
 		if (!at) return [];
-		return [
-			{
-				at,
-				category: oneOf(
-					item.category,
-					["auth", "quota", "network", "google", "template", "markers", "vault", "unknown"] as const,
-					"unknown"
-				),
-				message: item.message.slice(0, 300),
-			},
-		];
+		return [{ at, category: oneOf(item.category, ["auth", "quota", "network", "google", "ical", "template", "markers", "vault", "unknown"] as const, "unknown"), message: item.message.slice(0, 300) }];
 	}).slice(-20);
 }
 
@@ -318,10 +338,7 @@ function normalizeRendering(value: unknown): RenderingSettings {
 		allDayFirst: booleanValue(raw.allDayFirst, defaults.allDayFirst),
 		showDescriptions: booleanValue(raw.showDescriptions, defaults.showDescriptions),
 		showAttendees: booleanValue(raw.showAttendees, defaults.showAttendees),
-		includeAttendeeEmails: booleanValue(
-			raw.includeAttendeeEmails,
-			defaults.includeAttendeeEmails
-		),
+		includeAttendeeEmails: booleanValue(raw.includeAttendeeEmails, defaults.includeAttendeeEmails),
 		showLocations: booleanValue(raw.showLocations, defaults.showLocations),
 		showMeetingLinks: booleanValue(raw.showMeetingLinks, defaults.showMeetingLinks),
 		redactPrivateEvents: booleanValue(raw.redactPrivateEvents, defaults.redactPrivateEvents),
@@ -330,30 +347,20 @@ function normalizeRendering(value: unknown): RenderingSettings {
 		includeFreeEvents: booleanValue(raw.includeFreeEvents, defaults.includeFreeEvents),
 		includeFocusTime: booleanValue(raw.includeFocusTime, defaults.includeFocusTime),
 		includeOutOfOffice: booleanValue(raw.includeOutOfOffice, defaults.includeOutOfOffice),
-		includeWorkingLocation: booleanValue(
-			raw.includeWorkingLocation,
-			defaults.includeWorkingLocation
-		),
+		includeWorkingLocation: booleanValue(raw.includeWorkingLocation, defaults.includeWorkingLocation),
 		includeBirthdays: booleanValue(raw.includeBirthdays, defaults.includeBirthdays),
 		locale: stringValue(raw.locale, defaults.locale).trim() || "system",
 		hourCycle: oneOf(raw.hourCycle, ["system", "12", "24"] as const, defaults.hourCycle),
 		showEndTime: booleanValue(raw.showEndTime, defaults.showEndTime),
-		timeSeparator: stringValue(raw.timeSeparator, defaults.timeSeparator).slice(0, 8) || "–",
-		useGoogleCalendarColors: booleanValue(
-			raw.useGoogleCalendarColors,
-			defaults.useGoogleCalendarColors
-		),
+		timeSeparator: stringValue(raw.timeSeparator, defaults.timeSeparator).slice(0, 8) || "-",
+		useGoogleCalendarColors: booleanValue(raw.useGoogleCalendarColors, defaults.useGoogleCalendarColors),
 	};
 }
 
-/** Sequential structural migrations. Secrets are migrated separately before this function runs. */
 function migrateSettings(rawInput: UnknownRecord): UnknownRecord {
 	const raw = { ...rawInput };
 	let version = nonNegativeInteger(raw.schemaVersion, 0);
-	if (version < 1) {
-		// Version 1 names the pre-schema settings shape; normalization supplies missing values.
-		version = 1;
-	}
+	if (version < 1) version = 1;
 	if (version < 2) {
 		raw.rendering = isRecord(raw.rendering) ? raw.rendering : {};
 		raw.calendarHealth = isRecord(raw.calendarHealth) ? raw.calendarHealth : {};
@@ -364,55 +371,52 @@ function migrateSettings(rawInput: UnknownRecord): UnknownRecord {
 		version = 3;
 	}
 	if (version < 4) {
-		raw.dailyNoteFormat =
-			typeof raw.dailyNoteFormat === "string" && raw.dailyNoteFormat
-				? raw.dailyNoteFormat
-				: "YYYYMMDD";
+		raw.dailyNoteFormat = typeof raw.dailyNoteFormat === "string" && raw.dailyNoteFormat ? raw.dailyNoteFormat : "YYYYMMDD";
 		version = 4;
 	}
 	if (version < 5) {
 		raw.recentFailures = Array.isArray(raw.recentFailures) ? raw.recentFailures : [];
 		version = 5;
 	}
+	if (version < 6) {
+		const hadLegacyGoogle = Boolean(raw.googleClientId || raw.googleProjectId || raw.tokenExpiresAt || (Array.isArray(raw.calendars) && raw.calendars.length > 0));
+		raw.googleAccounts = hadLegacyGoogle ? [{
+			id: LEGACY_GOOGLE_ACCOUNT_ID,
+			name: "Google account",
+			clientId: raw.googleClientId,
+			projectId: raw.googleProjectId,
+			tokenExpiresAt: raw.tokenExpiresAt,
+			calendars: raw.calendars,
+			calendarHealth: raw.calendarHealth,
+			calendarCaches: raw.calendarCaches,
+		}] : [];
+		raw.iCalCalendars = [];
+		raw.iCalCaches = {};
+		raw.onboardingComplete = Boolean(raw.templatePath || raw.useDailyNotesSettings || hadLegacyGoogle);
+		version = 6;
+	}
 	raw.schemaVersion = Math.min(version, SETTINGS_SCHEMA_VERSION);
 	return raw;
 }
 
-/** Returns a fully validated settings object and whether repaired data should be persisted. */
-export function loadSettingsData(rawInput: unknown): {
-	settings: ObcaldianSettings;
-	changed: boolean;
-} {
+export function loadSettingsData(rawInput: unknown): { settings: DailyCalSyncSettings; changed: boolean } {
 	const original = isRecord(rawInput) ? rawInput : {};
 	const raw = migrateSettings(original);
-	const settings: ObcaldianSettings = {
+	const settings: DailyCalSyncSettings = {
 		schemaVersion: SETTINGS_SCHEMA_VERSION,
-		googleClientId: stringValue(raw.googleClientId, "").trim(),
-		googleProjectId: stringValue(raw.googleProjectId, "").trim(),
-		tokenExpiresAt: optionalTimestamp(raw.tokenExpiresAt),
-		calendars: normalizeCalendars(raw.calendars),
-		calendarHealth: normalizeHealth(raw.calendarHealth),
-		calendarCaches: normalizeCaches(raw.calendarCaches),
+		onboardingComplete: booleanValue(raw.onboardingComplete, false),
+		googleAccounts: normalizeGoogleAccounts(raw.googleAccounts),
+		iCalCalendars: normalizeICalCalendars(raw.iCalCalendars),
+		iCalCaches: normalizeICalCaches(raw.iCalCaches),
 		dailyNoteFolder: stringValue(raw.dailyNoteFolder, ""),
 		templatePath: stringValue(raw.templatePath, ""),
 		useDailyNotesSettings: booleanValue(raw.useDailyNotesSettings, false),
 		dailyNoteFormat: stringValue(raw.dailyNoteFormat, "YYYYMMDD").trim() || "YYYYMMDD",
-		noteCreationMode: oneOf(
-			raw.noteCreationMode,
-			["create-missing", "existing-only"] as const,
-			"create-missing"
-		),
+		noteCreationMode: oneOf(raw.noteCreationMode, ["create-missing", "existing-only"] as const, "create-missing"),
 		timezone: stringValue(raw.timezone, DEFAULT_SETTINGS.timezone),
 		syncDaysAhead: nonNegativeInteger(raw.syncDaysAhead, DEFAULT_SETTINGS.syncDaysAhead),
-		autoSyncIntervalMinutes: nonNegativeInteger(
-			raw.autoSyncIntervalMinutes,
-			DEFAULT_SETTINGS.autoSyncIntervalMinutes
-		),
-		multiDayCompletionBehavior: oneOf(
-			raw.multiDayCompletionBehavior,
-			["independent", "ask", "following"] as const,
-			"ask"
-		),
+		autoSyncIntervalMinutes: nonNegativeInteger(raw.autoSyncIntervalMinutes, DEFAULT_SETTINGS.autoSyncIntervalMinutes),
+		multiDayCompletionBehavior: oneOf(raw.multiDayCompletionBehavior, ["independent", "ask", "following"] as const, "ask"),
 		multiDayCompletionRules: normalizeRules(raw.multiDayCompletionRules),
 		rendering: normalizeRendering(raw.rendering),
 		lastSuccessfulSyncAt: optionalTimestamp(raw.lastSuccessfulSyncAt),

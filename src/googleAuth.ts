@@ -1,26 +1,29 @@
+import * as http from "node:http";
 import { Platform } from "obsidian";
 import type { SecretStorage, TFile } from "obsidian";
 import { googleRequest } from "./network";
-import type { ObcaldianSettings } from "./settings";
+import {
+	LEGACY_GOOGLE_ACCOUNT_ID,
+	type DailyCalSyncSettings,
+	type GoogleAccountProfile,
+} from "./settings";
 
 const REDIRECT_PORT = 42813;
 const CALLBACK_PATH = "/callback";
 const CALLBACK_TIMEOUT_MS = 120_000;
 const SCOPE = "https://www.googleapis.com/auth/calendar.readonly";
 
-const SECRET_CLIENT_SECRET = "obcaldian-google-client-secret";
-const SECRET_ACCESS_TOKEN = "obcaldian-google-access-token";
-const SECRET_REFRESH_TOKEN = "obcaldian-google-refresh-token";
+const LEGACY_SECRET_CLIENT_SECRET = "obcaldian-google-client-secret";
+const LEGACY_SECRET_ACCESS_TOKEN = "obcaldian-google-access-token";
+const LEGACY_SECRET_REFRESH_TOKEN = "obcaldian-google-refresh-token";
 
-const SUCCESS_HTML = `<!DOCTYPE html>
-<html><body><h2>Calendar connected.</h2>
-<p>You can close this tab and return to Obsidian.</p></body></html>`;
+const SUCCESS_HTML = `<!DOCTYPE html><html><body><h2>Calendar connected.</h2><p>You can close this tab and return to Obsidian.</p></body></html>`;
 
 export interface AuthDeps {
-	settings: ObcaldianSettings;
+	settings: DailyCalSyncSettings;
 	saveSettings: () => Promise<void>;
 	secretStorage: SecretStorage;
-	/** Optional recoverable cleanup used if a sync-created note must be rolled back. */
+	accountId?: string;
 	rollbackCreatedFile?: (file: TFile) => Promise<void>;
 }
 
@@ -44,7 +47,7 @@ interface TokenPayload {
 type UnknownRecord = Record<string, unknown>;
 
 export class ReconnectRequiredError extends Error {
-	constructor(message = "Google access was revoked or expired. Reconnect your account.") {
+	constructor(message = "Google access was revoked or expired. Reconnect this account.") {
 		super(message);
 		this.name = "ReconnectRequiredError";
 	}
@@ -54,17 +57,29 @@ function isRecord(value: unknown): value is UnknownRecord {
 	return typeof value === "object" && value !== null && !Array.isArray(value);
 }
 
+function accountSecretKey(accountId: string, kind: "client-secret" | "access-token" | "refresh-token"): string {
+	return `dailycalsync-google-${accountId}-${kind}`;
+}
+
+export function googleAccount(deps: AuthDeps): GoogleAccountProfile {
+	if (!deps.accountId) throw new Error("Choose a Google account profile first.");
+	const account = deps.settings.googleAccounts.find((candidate) => candidate.id === deps.accountId);
+	if (!account) throw new Error("The selected Google account profile no longer exists.");
+	return account;
+}
+
+export function withGoogleAccount(deps: AuthDeps, accountId: string): AuthDeps {
+	return { ...deps, accountId };
+}
+
 function escapeHtml(value: string): string {
-	return value.replace(/[&<>"']/g, (character) => {
-		const escaped: Record<string, string> = {
-			"&": "&amp;",
-			"<": "&lt;",
-			">": "&gt;",
-			'"': "&quot;",
-			"'": "&#39;",
-		};
-		return escaped[character] ?? character;
-	});
+	return value.replace(/[&<>"']/g, (character) => ({
+		"&": "&amp;",
+		"<": "&lt;",
+		">": "&gt;",
+		'"': "&quot;",
+		"'": "&#39;",
+	})[character] ?? character);
 }
 
 function failureHtml(message: string): string {
@@ -84,19 +99,11 @@ function randomUrlSafe(byteCount: number): string {
 }
 
 async function pkceChallenge(verifier: string): Promise<string> {
-	const digest = await window.crypto.subtle.digest(
-		"SHA-256",
-		new TextEncoder().encode(verifier)
-	);
+	const digest = await window.crypto.subtle.digest("SHA-256", new TextEncoder().encode(verifier));
 	return base64Url(new Uint8Array(digest));
 }
 
-function buildAuthUrl(
-	clientId: string,
-	redirectUri: string,
-	state: string,
-	codeChallenge: string
-): string {
+function buildAuthUrl(clientId: string, redirectUri: string, state: string, codeChallenge: string): string {
 	const params = new URLSearchParams({
 		client_id: clientId,
 		redirect_uri: redirectUri,
@@ -116,30 +123,17 @@ function parseTokenPayload(value: unknown, requireRefreshToken: boolean): TokenP
 	const accessToken = value.access_token;
 	const refreshToken = value.refresh_token;
 	const expiresIn = value.expires_in;
-	if (
-		typeof accessToken !== "string" ||
-		!accessToken ||
-		typeof expiresIn !== "number" ||
-		!Number.isFinite(expiresIn) ||
-		expiresIn <= 0 ||
-		(requireRefreshToken && (typeof refreshToken !== "string" || !refreshToken))
-	) {
+	if (typeof accessToken !== "string" || !accessToken || typeof expiresIn !== "number" || !Number.isFinite(expiresIn) || expiresIn <= 0 || (requireRefreshToken && (typeof refreshToken !== "string" || !refreshToken))) {
 		throw new Error("Google did not return the expected tokens.");
 	}
-	return {
-		accessToken,
-		expiresIn,
-		...(typeof refreshToken === "string" && refreshToken ? { refreshToken } : {}),
-	};
+	return { accessToken, expiresIn, ...(typeof refreshToken === "string" && refreshToken ? { refreshToken } : {}) };
 }
 
 function googleError(value: unknown): { code?: string; description?: string } {
 	if (!isRecord(value)) return {};
 	return {
 		...(typeof value.error === "string" ? { code: value.error } : {}),
-		...(typeof value.error_description === "string"
-			? { description: value.error_description }
-			: {}),
+		...(typeof value.error_description === "string" ? { description: value.error_description } : {}),
 	};
 }
 
@@ -159,76 +153,48 @@ export function parseGoogleCredentialsJson(rawText: string): ImportedGoogleCrede
 	const projectId = installed.project_id;
 	const authUri = installed.auth_uri;
 	const tokenUri = installed.token_uri;
-	if (
-		typeof clientId !== "string" ||
-		!clientId ||
-		typeof clientSecret !== "string" ||
-		!clientSecret ||
-		typeof projectId !== "string" ||
-		!projectId
-	) {
+	if (typeof clientId !== "string" || !clientId || typeof clientSecret !== "string" || !clientSecret || typeof projectId !== "string" || !projectId) {
 		throw new Error("The Google desktop credentials file is missing required fields.");
 	}
-	if (
-		(authUri !== undefined && authUri !== "https://accounts.google.com/o/oauth2/auth") ||
-		(tokenUri !== undefined && tokenUri !== "https://oauth2.googleapis.com/token")
-	) {
+	if ((authUri !== undefined && authUri !== "https://accounts.google.com/o/oauth2/auth") || (tokenUri !== undefined && tokenUri !== "https://oauth2.googleapis.com/token")) {
 		throw new Error("The credentials file contains unexpected OAuth endpoints.");
 	}
 	return { clientId, clientSecret, projectId };
 }
 
-export async function importGoogleCredentials(
-	deps: AuthDeps,
-	rawText: string
-): Promise<ImportedGoogleCredentials> {
+export async function importGoogleCredentials(deps: AuthDeps, rawText: string): Promise<ImportedGoogleCredentials> {
 	const credentials = parseGoogleCredentialsJson(rawText);
-	deps.settings.googleClientId = credentials.clientId;
-	deps.settings.googleProjectId = credentials.projectId;
+	const account = googleAccount(deps);
+	account.clientId = credentials.clientId;
+	account.projectId = credentials.projectId;
 	setClientSecret(deps, credentials.clientSecret);
 	await deps.saveSettings();
 	return credentials;
 }
 
 export function getClientSecret(deps: AuthDeps): string {
-	return deps.secretStorage.getSecret(SECRET_CLIENT_SECRET) ?? "";
+	const account = googleAccount(deps);
+	return deps.secretStorage.getSecret(accountSecretKey(account.id, "client-secret")) ?? "";
 }
 
 export function setClientSecret(deps: AuthDeps, secret: string): void {
-	deps.secretStorage.setSecret(SECRET_CLIENT_SECRET, secret);
+	const account = googleAccount(deps);
+	deps.secretStorage.setSecret(accountSecretKey(account.id, "client-secret"), secret);
 }
 
-/** True once a refresh token is on file and a token expiry has been recorded. */
 export function isConnected(deps: AuthDeps): boolean {
-	return (
-		deps.settings.tokenExpiresAt !== undefined &&
-		Boolean(deps.secretStorage.getSecret(SECRET_REFRESH_TOKEN))
-	);
+	if (!deps.accountId) {
+		return deps.settings.googleAccounts.some((account) => isConnected(withGoogleAccount(deps, account.id)));
+	}
+	const account = googleAccount(deps);
+	return account.tokenExpiresAt !== undefined && Boolean(deps.secretStorage.getSecret(accountSecretKey(account.id, "refresh-token")));
 }
 
-async function receiveAuthorizationCode(
-	clientId: string,
-	state: string,
-	codeChallenge: string,
-	options: ConnectOptions
-): Promise<{ code: string; redirectUri: string }> {
+async function receiveAuthorizationCode(clientId: string, state: string, codeChallenge: string, options: ConnectOptions): Promise<{ code: string; redirectUri: string }> {
 	if (!Platform.isDesktop) throw new Error("Google OAuth connection is available on desktop only.");
-	const http = await import("node:http");
 	const redirectUri = `http://127.0.0.1:${REDIRECT_PORT}${CALLBACK_PATH}`;
-
 	return new Promise((resolve, reject) => {
 		let settled = false;
-		const finish = (error?: Error, code?: string): void => {
-			if (settled) return;
-			settled = true;
-			window.clearTimeout(timeoutId);
-			options.signal?.removeEventListener("abort", abort);
-			server.close();
-			if (error) reject(error);
-			else if (code) resolve({ code, redirectUri });
-			else reject(new Error("Google authorization ended without a code."));
-		};
-		const abort = (): void => finish(new Error("Google connection was cancelled."));
 		const server = http.createServer((request, response) => {
 			try {
 				const url = new URL(request.url ?? "", redirectUri);
@@ -246,15 +212,8 @@ async function receiveAuthorizationCode(
 				}
 				const denied = url.searchParams.get("error");
 				const code = url.searchParams.get("code");
-				if (denied) {
-					const message = `Google denied the request: ${denied}`;
-					response.writeHead(400, { "Content-Type": "text/html; charset=utf-8" });
-					response.end(failureHtml(message));
-					finish(new Error(message));
-					return;
-				}
-				if (!code) {
-					const message = "No authorization code was received.";
+				if (denied || !code) {
+					const message = denied ? `Google denied the request: ${denied}` : "No authorization code was received.";
 					response.writeHead(400, { "Content-Type": "text/html; charset=utf-8" });
 					response.end(failureHtml(message));
 					finish(new Error(message));
@@ -267,54 +226,42 @@ async function receiveAuthorizationCode(
 				finish(error instanceof Error ? error : new Error("OAuth callback failed."));
 			}
 		});
-		const timeoutId = window.setTimeout(
-			() => finish(new Error("Google connection timed out. Try connecting again.")),
-			options.timeoutMs ?? CALLBACK_TIMEOUT_MS
-		);
-		server.once("error", (error) => finish(error));
+		const abort = (): void => finish(new Error("Google connection was cancelled."));
+		const timeoutId = window.setTimeout(() => finish(new Error("Google connection timed out. Try connecting again.")), options.timeoutMs ?? CALLBACK_TIMEOUT_MS);
+		function finish(error?: Error, code?: string): void {
+			if (settled) return;
+			settled = true;
+			window.clearTimeout(timeoutId);
+			options.signal?.removeEventListener("abort", abort);
+			server.close();
+			if (error) reject(error);
+			else if (code) resolve({ code, redirectUri });
+			else reject(new Error("Google authorization ended without a code."));
+		}
+		server.once("error", (error) => finish(new Error(`Could not start the local OAuth callback: ${error.message}`)));
 		options.signal?.addEventListener("abort", abort, { once: true });
 		if (options.signal?.aborted) {
 			abort();
 			return;
 		}
-		server.listen(REDIRECT_PORT, "127.0.0.1", () => {
-			window.open(buildAuthUrl(clientId, redirectUri, state, codeChallenge));
-		});
+		server.listen(REDIRECT_PORT, "127.0.0.1", () => window.open(buildAuthUrl(clientId, redirectUri, state, codeChallenge)));
 	});
 }
 
-/** Runs the local installed-app OAuth flow with PKCE and request-state verification. */
-export async function connectGoogleAccount(
-	deps: AuthDeps,
-	options: ConnectOptions = {}
-): Promise<void> {
-	const { settings } = deps;
+export async function connectGoogleAccount(deps: AuthDeps, options: ConnectOptions = {}): Promise<void> {
+	const account = googleAccount(deps);
 	const clientSecret = getClientSecret(deps);
-	if (!settings.googleClientId || !clientSecret) {
-		throw new Error("Import Google desktop credentials or set a Client ID and secret first.");
-	}
+	if (!account.clientId || !clientSecret) throw new Error("Import Google desktop credentials or set a Client ID and secret first.");
 	const state = randomUrlSafe(32);
 	const verifier = randomUrlSafe(64);
 	const challenge = await pkceChallenge(verifier);
-	const { code, redirectUri } = await receiveAuthorizationCode(
-		settings.googleClientId,
-		state,
-		challenge,
-		options
-	);
+	const { code, redirectUri } = await receiveAuthorizationCode(account.clientId, state, challenge, options);
 	const response = await googleRequest({
 		url: "https://oauth2.googleapis.com/token",
 		method: "POST",
 		contentType: "application/x-www-form-urlencoded",
 		throw: false,
-		body: new URLSearchParams({
-			code,
-			client_id: settings.googleClientId,
-			client_secret: clientSecret,
-			redirect_uri: redirectUri,
-			grant_type: "authorization_code",
-			code_verifier: verifier,
-		}).toString(),
+		body: new URLSearchParams({ code, client_id: account.clientId, client_secret: clientSecret, redirect_uri: redirectUri, grant_type: "authorization_code", code_verifier: verifier }).toString(),
 	});
 	const payload: unknown = response.json;
 	if (response.status >= 400) {
@@ -322,101 +269,87 @@ export async function connectGoogleAccount(
 		throw new Error(error.description ?? error.code ?? "Google token exchange failed.");
 	}
 	const tokens = parseTokenPayload(payload, true);
-	deps.secretStorage.setSecret(SECRET_ACCESS_TOKEN, tokens.accessToken);
-	deps.secretStorage.setSecret(SECRET_REFRESH_TOKEN, tokens.refreshToken ?? "");
-	settings.tokenExpiresAt = Date.now() + tokens.expiresIn * 1000;
+	deps.secretStorage.setSecret(accountSecretKey(account.id, "access-token"), tokens.accessToken);
+	deps.secretStorage.setSecret(accountSecretKey(account.id, "refresh-token"), tokens.refreshToken ?? "");
+	account.tokenExpiresAt = Date.now() + tokens.expiresIn * 1000;
 	await deps.saveSettings();
 }
 
-/** Clears local tokens and, by default, asks Google to revoke the refresh token first. */
 export async function disconnectGoogleAccount(deps: AuthDeps, revoke = true): Promise<boolean> {
-	const refreshToken = deps.secretStorage.getSecret(SECRET_REFRESH_TOKEN);
+	const account = googleAccount(deps);
+	const refreshToken = deps.secretStorage.getSecret(accountSecretKey(account.id, "refresh-token"));
 	let revoked = false;
 	if (revoke && refreshToken) {
 		try {
-			const response = await googleRequest({
-				url: "https://oauth2.googleapis.com/revoke",
-				method: "POST",
-				contentType: "application/x-www-form-urlencoded",
-				body: new URLSearchParams({ token: refreshToken }).toString(),
-				throw: false,
-			});
+			const response = await googleRequest({ url: "https://oauth2.googleapis.com/revoke", method: "POST", contentType: "application/x-www-form-urlencoded", body: new URLSearchParams({ token: refreshToken }).toString(), throw: false });
 			revoked = response.status >= 200 && response.status < 300;
 		} catch {
-			// Local disconnect still succeeds when the device is offline.
+			// Local disconnect still succeeds while offline.
 		}
 	}
-	deps.secretStorage.setSecret(SECRET_ACCESS_TOKEN, "");
-	deps.secretStorage.setSecret(SECRET_REFRESH_TOKEN, "");
-	deps.settings.tokenExpiresAt = undefined;
+	deps.secretStorage.setSecret(accountSecretKey(account.id, "access-token"), "");
+	deps.secretStorage.setSecret(accountSecretKey(account.id, "refresh-token"), "");
+	account.tokenExpiresAt = undefined;
 	await deps.saveSettings();
 	return revoked;
 }
 
 async function refreshAccessToken(deps: AuthDeps): Promise<string> {
-	const { settings } = deps;
-	const refreshToken = deps.secretStorage.getSecret(SECRET_REFRESH_TOKEN);
+	const account = googleAccount(deps);
+	const refreshToken = deps.secretStorage.getSecret(accountSecretKey(account.id, "refresh-token"));
 	if (!refreshToken) throw new ReconnectRequiredError();
 	const response = await googleRequest({
 		url: "https://oauth2.googleapis.com/token",
 		method: "POST",
 		contentType: "application/x-www-form-urlencoded",
 		throw: false,
-		body: new URLSearchParams({
-			refresh_token: refreshToken,
-			client_id: settings.googleClientId,
-			client_secret: getClientSecret(deps),
-			grant_type: "refresh_token",
-		}).toString(),
+		body: new URLSearchParams({ refresh_token: refreshToken, client_id: account.clientId, client_secret: getClientSecret(deps), grant_type: "refresh_token" }).toString(),
 	});
 	const payload: unknown = response.json;
 	if (response.status >= 400) {
 		const error = googleError(payload);
 		if (error.code === "invalid_grant") {
-			deps.secretStorage.setSecret(SECRET_ACCESS_TOKEN, "");
-			deps.secretStorage.setSecret(SECRET_REFRESH_TOKEN, "");
-			settings.tokenExpiresAt = undefined;
+			deps.secretStorage.setSecret(accountSecretKey(account.id, "access-token"), "");
+			deps.secretStorage.setSecret(accountSecretKey(account.id, "refresh-token"), "");
+			account.tokenExpiresAt = undefined;
 			await deps.saveSettings();
 			throw new ReconnectRequiredError();
 		}
 		throw new Error(error.description ?? error.code ?? "Failed to refresh Google access.");
 	}
 	const tokens = parseTokenPayload(payload, false);
-	deps.secretStorage.setSecret(SECRET_ACCESS_TOKEN, tokens.accessToken);
-	settings.tokenExpiresAt = Date.now() + tokens.expiresIn * 1000;
+	deps.secretStorage.setSecret(accountSecretKey(account.id, "access-token"), tokens.accessToken);
+	account.tokenExpiresAt = Date.now() + tokens.expiresIn * 1000;
 	await deps.saveSettings();
 	return tokens.accessToken;
 }
 
-/** Returns a valid access token, refreshing it first if it has expired. */
 export async function getValidAccessToken(deps: AuthDeps): Promise<string> {
-	if (deps.settings.tokenExpiresAt === undefined) throw new ReconnectRequiredError();
-	if (Date.now() > deps.settings.tokenExpiresAt - 60_000) return refreshAccessToken(deps);
-	const accessToken = deps.secretStorage.getSecret(SECRET_ACCESS_TOKEN);
+	const account = googleAccount(deps);
+	if (account.tokenExpiresAt === undefined) throw new ReconnectRequiredError();
+	if (Date.now() > account.tokenExpiresAt - 60_000) return refreshAccessToken(deps);
+	const accessToken = deps.secretStorage.getSecret(accountSecretKey(account.id, "access-token"));
 	if (!accessToken) throw new ReconnectRequiredError();
 	return accessToken;
 }
 
-/** Migrates secrets written by pre-SecretStorage versions and removes plaintext copies. */
-export function migrateLegacySecrets(
-	secretStorage: SecretStorage,
-	raw: Record<string, unknown>
-): boolean {
+/** Migrates pre-profile secrets into the isolated default profile and removes plaintext copies. */
+export function migrateLegacySecrets(secretStorage: SecretStorage, raw: Record<string, unknown>): boolean {
 	let migrated = false;
-	if (typeof raw.googleClientSecret === "string" && raw.googleClientSecret) {
-		secretStorage.setSecret(SECRET_CLIENT_SECRET, raw.googleClientSecret);
+	const move = (legacyKey: string, kind: "client-secret" | "access-token" | "refresh-token", explicit?: unknown): void => {
+		const value = typeof explicit === "string" && explicit ? explicit : secretStorage.getSecret(legacyKey);
+		if (!value) return;
+		secretStorage.setSecret(accountSecretKey(LEGACY_GOOGLE_ACCOUNT_ID, kind), value);
+		secretStorage.setSecret(legacyKey, "");
 		migrated = true;
-	}
+	};
+	move(LEGACY_SECRET_CLIENT_SECRET, "client-secret", raw.googleClientSecret);
 	delete raw.googleClientSecret;
 	const legacyTokens = isRecord(raw.tokens) ? raw.tokens : undefined;
-	if (legacyTokens) {
-		if (typeof legacyTokens.accessToken === "string" && legacyTokens.accessToken) {
-			secretStorage.setSecret(SECRET_ACCESS_TOKEN, legacyTokens.accessToken);
-		}
-		if (typeof legacyTokens.refreshToken === "string" && legacyTokens.refreshToken) {
-			secretStorage.setSecret(SECRET_REFRESH_TOKEN, legacyTokens.refreshToken);
-		}
-		if (typeof legacyTokens.expiresAt === "number") raw.tokenExpiresAt = legacyTokens.expiresAt;
+	move(LEGACY_SECRET_ACCESS_TOKEN, "access-token", legacyTokens?.accessToken);
+	move(LEGACY_SECRET_REFRESH_TOKEN, "refresh-token", legacyTokens?.refreshToken);
+	if (legacyTokens && typeof legacyTokens.expiresAt === "number") {
+		raw.tokenExpiresAt = legacyTokens.expiresAt;
 		migrated = true;
 	}
 	delete raw.tokens;

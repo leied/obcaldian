@@ -3,6 +3,7 @@ import type { Moment } from "moment";
 import {
 	ReconnectRequiredError,
 	isConnected,
+	withGoogleAccount,
 	type AuthDeps,
 } from "./googleAuth";
 import {
@@ -31,7 +32,12 @@ import {
 	type MultiDaySpan,
 } from "./multiDay";
 import { GoogleHttpError } from "./network";
+import { ICalHttpError } from "./network";
+import { refreshICalCalendar } from "./ical";
 import type {
+	CalendarConfig,
+	GoogleAccountProfile,
+	ICalCalendarConfig,
 	MultiDayCompletionRule,
 	RenderingSettings,
 	SyncFailureCategory,
@@ -48,7 +54,12 @@ interface DateToSync {
 interface FetchedDay extends DateToSync {
 	dateKey: string;
 	eventsByCalendar: Map<string, GoogleEvent[]>;
+	calendars: CalendarConfig[];
 }
+
+type EnabledCalendarSource =
+	| { kind: "google"; config: CalendarConfig; remoteId: string; account: GoogleAccountProfile }
+	| { kind: "ical"; config: CalendarConfig; calendar: ICalCalendarConfig };
 
 interface MultiDayGroup {
 	eventKey: string;
@@ -142,6 +153,7 @@ function classifyFailure(error: unknown): SyncFailureCategory {
 		if (error.status === 429) return "quota";
 		return "google";
 	}
+	if (error instanceof ICalHttpError) return "ical";
 	const message = error instanceof Error ? error.message.toLowerCase() : "";
 	if (message.includes("template")) return "template";
 	if (message.includes("marker")) return "markers";
@@ -150,6 +162,38 @@ function classifyFailure(error: unknown): SyncFailureCategory {
 		return "vault";
 	}
 	return "unknown";
+}
+
+function enabledCalendarSources(deps: AuthDeps): EnabledCalendarSource[] {
+	const google = deps.settings.googleAccounts.flatMap((account) =>
+		account.calendars
+			.filter((calendar) => calendar.enabled)
+			.map((calendar) => ({
+				kind: "google" as const,
+				account,
+				remoteId: calendar.id,
+				config: { ...calendar, id: `google:${account.id}:${calendar.id}` },
+			}))
+	);
+	const iCal = deps.settings.iCalCalendars
+		.filter((calendar) => calendar.enabled)
+		.map((calendar) => ({
+			kind: "ical" as const,
+			calendar,
+			config: { ...calendar, id: `ical:${calendar.id}` },
+		}));
+	return [...google, ...iCal];
+}
+
+function cachedICalEvents(deps: AuthDeps, calendarId: string): GoogleEvent[] {
+	const cache = deps.settings.iCalCaches[calendarId];
+	if (!cache) return [];
+	return Object.values(cache.events).flatMap((value) => {
+		const candidate = value as unknown as GoogleEvent;
+		return typeof candidate.summary === "string" && candidate.start && candidate.end
+			? [candidate]
+			: [];
+	});
 }
 
 function eventKeysForDay(day: FetchedDay, rendering?: RenderingSettings): Set<string> {
@@ -164,8 +208,8 @@ function eventKeysForDay(day: FetchedDay, rendering?: RenderingSettings): Set<st
 	return keys;
 }
 
-async function fetchDays(deps: AuthDeps, dates: DateToSync[]): Promise<FetchedDay[]> {
-	const enabled = deps.settings.calendars.filter((calendar) => calendar.enabled);
+async function fetchDays(deps: AuthDeps, dates: DateToSync[], signal?: AbortSignal): Promise<FetchedDay[]> {
+	const enabled = enabledCalendarSources(deps);
 	const firstDate = dates.reduce((earliest, item) =>
 		item.date.isBefore(earliest.date) ? item : earliest
 	);
@@ -175,38 +219,44 @@ async function fetchDays(deps: AuthDeps, dates: DateToSync[]): Promise<FetchedDa
 		firstDate.date.date(),
 		deps.settings.timezone
 	);
+	const lastDate = dates.reduce((latest, item) => item.date.isAfter(latest.date) ? item : latest);
+	const lastRange = zonedDayRange(lastDate.date.year(), lastDate.date.month() + 1, lastDate.date.date(), deps.settings.timezone);
 	const eventsByCalendar = new Map<string, GoogleEvent[]>();
-	for (const calendar of enabled) {
+	for (const source of enabled) {
 		try {
-			eventsByCalendar.set(
-				calendar.id,
-				await refreshCalendarCache(deps, calendar.id, range.start)
-			);
+			const events = source.kind === "google"
+				? await refreshCalendarCache(withGoogleAccount(deps, source.account.id), source.remoteId, range.start)
+				: await refreshICalCalendar(deps, source.calendar, range.start, lastRange.end, signal);
+			eventsByCalendar.set(source.config.id, events);
 		} catch (error) {
-			const category = classifyFailure(error);
+			const category = source.kind === "ical" ? "ical" : classifyFailure(error);
 			const dateKey = firstDate.date.format("YYYY-MM-DD");
-			const reason = error instanceof Error ? error.message : "Unknown Google error.";
-			deps.settings.calendarHealth[calendar.id] = {
-				...deps.settings.calendarHealth[calendar.id],
-				lastFailureAt: Date.now(),
-				lastFailureCategory: category,
-				lastFailureMessage: `Failed for range starting ${dateKey}: ${reason}`.slice(0, 300),
-			};
+			const reason = (error instanceof Error ? error.message : "Unknown calendar error.")
+				.replace(/https?:\/\/\S+/g, "[redacted URL]");
+			if (source.kind === "google") {
+				source.account.calendarHealth[source.remoteId] = {
+					...source.account.calendarHealth[source.remoteId],
+					lastFailureAt: Date.now(),
+					lastFailureCategory: category,
+					lastFailureMessage: `Failed for range starting ${dateKey}: ${reason}`.slice(0, 300),
+				};
+			}
 			throw new CategorizedSyncError(
-				`Failed to fetch "${calendar.summary}" for range starting ${dateKey}: ${reason}`,
+				`Failed to fetch "${source.config.summary}" for range starting ${dateKey}: ${reason}`,
 				category,
-				calendar.id
+				source.config.id
 			);
 		}
 	}
 	const fetched = dates.map((input) => ({
 		...input,
 		dateKey: input.date.format("YYYY-MM-DD"),
-		eventsByCalendar: new Map(
-			enabled.map((calendar) => [
-				calendar.id,
-				cachedEventsForDay(
-					eventsByCalendar.get(calendar.id) ?? [],
+			calendars: enabled.map((source) => source.config),
+			eventsByCalendar: new Map(
+				enabled.map((source) => [
+					source.config.id,
+					cachedEventsForDay(
+						eventsByCalendar.get(source.config.id) ?? [],
 					input.date,
 					deps.settings.timezone
 				),
@@ -214,10 +264,10 @@ async function fetchDays(deps: AuthDeps, dates: DateToSync[]): Promise<FetchedDa
 		),
 	}));
 	const now = Date.now();
-	for (const calendar of enabled) {
-		deps.settings.calendarHealth[calendar.id] = {
-			lastSuccessAt: now,
-		};
+	for (const source of enabled) {
+		if (source.kind === "google") {
+			source.account.calendarHealth[source.remoteId] = { lastSuccessAt: now };
+		}
 	}
 	return fetched;
 }
@@ -225,8 +275,8 @@ async function fetchDays(deps: AuthDeps, dates: DateToSync[]): Promise<FetchedDa
 function collectMultiDayGroups(deps: AuthDeps, days: FetchedDay[]): MultiDayGroup[] {
 	const groups = new Map<string, MultiDayGroup>();
 	const checkboxCalendarIds = new Set(
-		deps.settings.calendars
-			.filter((calendar) => calendar.enabled && calendar.addAs === "checkbox")
+		days.flatMap((day) => day.calendars)
+			.filter((calendar) => calendar.addAs === "checkbox")
 			.map((calendar) => calendar.id)
 	);
 	for (const day of days) {
@@ -345,9 +395,12 @@ async function prepareSync(
 ): Promise<PreparedSync> {
 	await preflightFolder(vault, deps);
 	const previousLocations = new Map<string, Set<string>>();
-	for (const calendar of deps.settings.calendars.filter((item) => item.enabled)) {
-		for (const event of calendarCacheEvents(deps, calendar.id)) {
-			const eventKey = eventOccurrenceKey(calendar.id, event);
+	for (const source of enabledCalendarSources(deps)) {
+		const events = source.kind === "google"
+			? calendarCacheEvents(withGoogleAccount(deps, source.account.id), source.remoteId)
+			: cachedICalEvents(deps, source.calendar.id);
+		for (const event of events) {
+			const eventKey = eventOccurrenceKey(source.config.id, event);
 			const dateKey = eventStartDate(event, deps.settings.timezone);
 			if (!eventKey || !dateKey) continue;
 			const dates = previousLocations.get(eventKey) ?? new Set<string>();
@@ -355,7 +408,7 @@ async function prepareSync(
 			previousLocations.set(eventKey, dates);
 		}
 	}
-	const days = await fetchDays(deps, dates);
+	const days = await fetchDays(deps, dates, opts.signal);
 	const checked = await resolveCheckedEvents(vault, deps, days, opts);
 	const localPreserved = new Map<string, Map<string, PreservedEventState>>();
 	const globalPreserved = new Map<string, PreservedEventState>();
@@ -427,7 +480,7 @@ async function prepareSync(
 			}
 		}
 		const renderedBlock = renderCalendarBlock(
-			deps.settings.calendars,
+			day.calendars,
 			day.eventsByCalendar,
 			deps.settings.timezone,
 			day.dateKey,
@@ -561,15 +614,18 @@ async function runDates(
 	opts: SyncOptions
 ): Promise<void> {
 	const notify = opts.notify ?? true;
-	if (!isConnected(deps)) {
-		const message = "connect your Google account first";
-		if (notify) new Notice(`Obcaldian: ${message}.`);
+	const disconnected = deps.settings.googleAccounts.find(
+		(account) => account.calendars.some((calendar) => calendar.enabled) && !isConnected(withGoogleAccount(deps, account.id))
+	);
+	if (disconnected) {
+		const message = `connect the Google account "${disconnected.name}" first`;
+		if (notify) new Notice(`DailyCalSync: ${message}.`);
 		opts.onError?.(message);
 		return;
 	}
-	if (!deps.settings.calendars.some((calendar) => calendar.enabled)) {
+	if (enabledCalendarSources(deps).length === 0) {
 		const message = "no calendars enabled";
-		if (notify) new Notice(`Obcaldian: ${message} — nothing to sync.`);
+		if (notify) new Notice(`DailyCalSync: ${message} — nothing to sync.`);
 		opts.onError?.(message);
 		return;
 	}
@@ -586,7 +642,7 @@ async function runDates(
 		opts.onApplied?.(snapshot);
 		if (notify) {
 			new Notice(
-				`Obcaldian: synced ${dates.length} day${dates.length === 1 ? "" : "s"}.`
+				`DailyCalSync: synced ${dates.length} day${dates.length === 1 ? "" : "s"}.`
 			);
 		}
 		opts.onSuccess?.(dates.length);
@@ -607,8 +663,8 @@ async function runDates(
 		} catch {
 			// The original categorized failure remains the useful error.
 		}
-		if (notify) new Notice(`Obcaldian sync failed: ${message}`);
-		else console.error("Obcaldian: background sync failed", error);
+		if (notify) new Notice(`DailyCalSync sync failed: ${message}`);
+		else console.error("DailyCalSync: background sync failed", error);
 		opts.onError?.(message);
 	}
 }
@@ -627,7 +683,7 @@ export async function syncDateRange(
 	const dayCount = ascendingEnd.diff(ascendingStart, "days") + 1;
 	if (dayCount > MAX_SYNC_DAYS) {
 		const message = `date range is limited to ${MAX_SYNC_DAYS} days`;
-		if (opts.notify ?? true) new Notice(`Obcaldian: ${message}.`);
+		if (opts.notify ?? true) new Notice(`DailyCalSync: ${message}.`);
 		opts.onError?.(message);
 		return;
 	}

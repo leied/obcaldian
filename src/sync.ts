@@ -596,6 +596,8 @@ async function applyPlan(vault: Vault, deps: AuthDeps, prepared: PreparedSync): 
 		}
 	}
 	const applied: SyncPlanEntry[] = [];
+	const previousRules = deps.settings.multiDayCompletionRules;
+	const previousLastSuccessfulSyncAt = deps.settings.lastSuccessfulSyncAt;
 	try {
 		for (const entry of prepared.plan.entries) {
 			if (entry.operation === "skip" || entry.afterContent === null) continue;
@@ -608,7 +610,12 @@ async function applyPlan(vault: Vault, deps: AuthDeps, prepared: PreparedSync): 
 			}
 			applied.push(entry);
 		}
+		if (prepared.rulesChanged) deps.settings.multiDayCompletionRules = prepared.rules;
+		deps.settings.lastSuccessfulSyncAt = Date.now();
+		await deps.saveSettings();
 	} catch (error) {
+		deps.settings.multiDayCompletionRules = previousRules;
+		deps.settings.lastSuccessfulSyncAt = previousLastSuccessfulSyncAt;
 		for (const entry of applied.reverse()) {
 			const file = vault.getAbstractFileByPath(entry.path);
 			if (!(file instanceof TFile)) continue;
@@ -625,9 +632,6 @@ async function applyPlan(vault: Vault, deps: AuthDeps, prepared: PreparedSync): 
 		}
 		throw error;
 	}
-	if (prepared.rulesChanged) deps.settings.multiDayCompletionRules = prepared.rules;
-	deps.settings.lastSuccessfulSyncAt = Date.now();
-	await deps.saveSettings();
 	return {
 		createdAt: Date.now(),
 		entries: applied.flatMap((entry) =>

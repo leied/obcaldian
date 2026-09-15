@@ -88,6 +88,35 @@ describe("incremental calendar cache", () => {
 		expect(events[0].summary).toBe("Updated");
 		expect(auth.settings.googleAccounts[0].calendarCaches.work.syncToken).toBe("token-2");
 		expect(vi.mocked(requestUrl).mock.calls[1][0].url).toContain("syncToken=token-1");
+		expect(vi.mocked(requestUrl).mock.calls[1][0].url).toContain("timeZone=UTC");
+	});
+
+	it("rebuilds the cache when the configured timezone changes", async () => {
+		const auth = deps();
+		vi.mocked(requestUrl)
+			.mockResolvedValueOnce({
+				status: 200,
+				headers: {},
+				json: { items: [], nextSyncToken: "utc-token" },
+			} as never)
+			.mockResolvedValueOnce({
+				status: 200,
+				headers: {},
+				json: { items: [], nextSyncToken: "la-token" },
+			} as never);
+
+		await refreshCalendarCache(auth, "work", new Date("2026-07-01T00:00:00Z"));
+		auth.settings.timezone = "America/Los_Angeles";
+		await refreshCalendarCache(auth, "work", new Date("2026-07-10T00:00:00Z"));
+
+		const secondUrl = vi.mocked(requestUrl).mock.calls[1][0].url;
+		expect(secondUrl).toContain("timeMin=");
+		expect(secondUrl).not.toContain("syncToken=");
+		expect(secondUrl).toContain("timeZone=America%2FLos_Angeles");
+		expect(auth.settings.googleAccounts[0].calendarCaches.work).toMatchObject({
+			syncToken: "la-token",
+			timeZone: "America/Los_Angeles",
+		});
 	});
 
 	it("drops finished events and moves coverage up so stale days are refetched", async () => {
@@ -96,6 +125,7 @@ describe("incremental calendar cache", () => {
 		auth.settings.googleAccounts[0].calendarCaches.work = {
 			syncToken: "token-1",
 			coverageStart: "2026-01-01T00:00:00.000Z",
+			timeZone: "UTC",
 			updatedAt: now,
 			events: {
 				"old::": {
@@ -135,6 +165,7 @@ describe("incremental calendar cache", () => {
 		auth.settings.googleAccounts[0].calendarCaches.work = {
 			syncToken: "token-1",
 			coverageStart: "2026-01-01T00:00:00.000Z",
+			timeZone: "UTC",
 			updatedAt: now,
 			events: {
 				"old::": {
@@ -197,6 +228,7 @@ describe("incremental calendar cache", () => {
 		auth.settings.googleAccounts[0].calendarCaches.work = {
 			syncToken: "expired",
 			coverageStart: "2026-07-01T00:00:00.000Z",
+			timeZone: "UTC",
 			updatedAt: Date.now(),
 			events: {},
 		};

@@ -239,6 +239,39 @@ describe("syncRange status callbacks", () => {
 });
 
 describe("sync planning, preview, and undo", () => {
+	it("rolls note changes back when final settings persistence fails", async () => {
+		const vault = new FakeVault();
+		const today = `${moment().format("YYYYMMDD")}.md`;
+		const original = [
+			"outside",
+			"<!-- dailycalsync:calendar:start -->",
+			"old calendar",
+			"<!-- dailycalsync:calendar:end -->",
+		].join("\n");
+		await vault.create(today, original);
+		const deps = connectedDeps();
+		deps.settings.lastSuccessfulSyncAt = 123;
+		deps.saveSettings = vi.fn()
+			.mockResolvedValueOnce(undefined)
+			.mockRejectedValue(new Error("settings storage unavailable"));
+		const onApplied = vi.fn();
+		const onSuccess = vi.fn();
+		const onError = vi.fn();
+
+		await syncRange(vault as never, deps, 0, {
+			notify: false,
+			onApplied,
+			onSuccess,
+			onError,
+		});
+
+		expect(vault.contentOf(today)).toBe(original);
+		expect(deps.settings.lastSuccessfulSyncAt).toBe(123);
+		expect(onApplied).not.toHaveBeenCalled();
+		expect(onSuccess).not.toHaveBeenCalled();
+		expect(onError).toHaveBeenCalledWith("settings storage unavailable");
+	});
+
 	it("does not write when the manual preview is cancelled", async () => {
 		const vault = new FakeVault();
 		await vault.create("Templates/Daily.md", "{{date}}\n{calendar}\n");

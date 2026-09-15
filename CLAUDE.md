@@ -97,8 +97,9 @@ Module responsibilities in `src/`, in dependency order:
 - **`network.ts`** — the only production module allowed to call `requestUrl`; enforces the fixed
   Google host allowlist, validates user-selected iCalendar HTTPS URLs, and provides bounded,
   cancellable retries.
-- **`ical.ts`** — SecretStorage URL access, defensive ICS parsing, and bounded recurrence expansion
-  for daily, weekly, monthly, and yearly feeds.
+- **`ical.ts`** — SecretStorage URL access, defensive ICS parsing, and bounded RFC-style recurrence
+  expansion via `rrule`. Invalid/unsupported recurrence values fail the feed sync instead of being
+  silently approximated.
 - **`timezone.ts`** — pure, no Obsidian dependency. `zonedDayRange(year, month, day, timeZone)`
   resolves the UTC instants for midnight-to-midnight of a given calendar day in an arbitrary IANA
   zone, via `Intl.DateTimeFormat` offset reconstruction (no `moment-timezone` dependency). Used so
@@ -107,8 +108,9 @@ Module responsibilities in `src/`, in dependency order:
   validation (see below).
 - **`googleCalendar.ts`** — Calendar API wrappers plus a per-calendar full/incremental cache.
   Initial sync stores `nextSyncToken`, incremental responses update cached occurrences, a `410 Gone`
-  rebuilds the calendar, and requested note days are filtered locally. Pagination is followed in
-  every list path.
+  rebuilds the calendar, and requested note days are filtered locally. The timezone used to create
+  a sync token is stored with the cache; incremental requests repeat it, and a timezone change
+  forces a full rebuild. Pagination is followed in every list path.
   `GoogleEvent` includes `description`, `attendees`, and `htmlLink` (used for footnotes and the
   event link), plus Google's stable event-instance `id` for multi-day identity — all returned by
   the API by default, no extra `fields` param needed.
@@ -180,6 +182,8 @@ Module responsibilities in `src/`, in dependency order:
 - **`sync.ts`** — the serialized sync coordinator. It refreshes each enabled calendar once, builds
   an in-memory plan, preflights every template/target/marker, offers manual preview, rechecks files
   after preview, applies writes with rollback, and emits a managed-section-only undo snapshot.
+  Final settings persistence is part of the apply transaction: if it fails, note writes and the
+  in-memory completion/success state are restored before the failure is reported.
   Date-range limits, update-existing-only mode, multi-day completion, moved-annotation lookup,
   per-calendar health, categorized failures, multi-profile Google and iCalendar sources, and
   stale-write protection all live here.
@@ -223,7 +227,8 @@ Module responsibilities in `src/`, in dependency order:
   `applyAutoSyncInterval()` clears any existing background-sync `window.setInterval` and, if
   `settings.autoSyncIntervalMinutes > 0`, starts a new one calling `autoSyncTick` (registered via
   `this.registerInterval` for unload cleanup); called once from `onload` and again whenever the
-  settings tab changes that value.
+  settings tab changes that value. The same zero value also disables startup, online, and resume
+  catch-up checks through `syncSchedule.ts`.
   - A status bar item (`addStatusBarItem()`, next to Obsidian's built-in word/char count) shows
     live sync state — idle (blank), "syncing…", "synced Xm ago", or "sync failed" — driven by
     `syncOptions()`, a `SyncOptions` object passed to every `syncAll`/`syncRange`/

@@ -26,6 +26,7 @@ import { SyncDateRangeModal } from "./syncDateRangeModal";
 import { RepairCalendarModal } from "./repairCalendarModal";
 import { copyRedactedDiagnostics } from "./diagnostics";
 import { OnboardingModal } from "./onboardingModal";
+import { shouldRunAutomaticCatchUp } from "./syncSchedule";
 
 type SyncBarState =
 	| { kind: "idle" }
@@ -229,15 +230,7 @@ export default class DailyCalSyncPlugin extends Plugin {
 	}
 
 	private quietCatchUp(): void {
-		const hasEnabledSource =
-			this.settings.googleAccounts.some((account) => account.calendars.some((calendar) => calendar.enabled)) ||
-			this.settings.iCalCalendars.some((calendar) => calendar.enabled);
-		if (!hasEnabledSource) {
-			return;
-		}
-		const staleAfterMinutes = this.settings.autoSyncIntervalMinutes || 180;
-		const lastSuccess = this.settings.lastSuccessfulSyncAt ?? 0;
-		if (Date.now() - lastSuccess < staleAfterMinutes * 60_000) return;
+		if (!shouldRunAutomaticCatchUp(this.settings)) return;
 		void autoSyncTick(this.app.vault, this.authDeps(), this.syncOptions());
 	}
 

@@ -26,6 +26,31 @@ describe("DEFAULT_SETTINGS", () => {
 });
 
 describe("loadSettingsData", () => {
+	it("discards legacy Google caches that have no originating timezone", () => {
+		const loaded = loadSettingsData({
+			...DEFAULT_SETTINGS,
+			googleAccounts: [{
+				id: "account-one",
+				name: "Account",
+				clientId: "client",
+				projectId: "project",
+				calendars: [],
+				calendarHealth: {},
+				calendarCaches: {
+					work: {
+						syncToken: "legacy-token",
+						coverageStart: "2026-09-01T00:00:00.000Z",
+						updatedAt: 1,
+						events: {},
+					},
+				},
+			}],
+		});
+
+		expect(loaded.settings.googleAccounts[0].calendarCaches).toEqual({});
+		expect(loaded.changed).toBe(true);
+	});
+
 	it("migrates legacy data and repairs malformed nested values", () => {
 		const loaded = loadSettingsData({
 			googleClientId: "  client  ",

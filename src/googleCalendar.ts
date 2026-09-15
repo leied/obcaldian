@@ -298,6 +298,7 @@ async function fullCalendarSync(
 	googleAccount(deps).calendarCaches[calendarId] = {
 		syncToken: result.nextSyncToken,
 		coverageStart: coverageStart.toISOString(),
+		timeZone: deps.settings.timezone,
 		updatedAt: Date.now(),
 		events,
 	};
@@ -312,12 +313,17 @@ export async function refreshCalendarCache(
 ): Promise<GoogleEvent[]> {
 	const account = googleAccount(deps);
 	const cache = account.calendarCaches[calendarId];
-	if (!cache || Date.parse(cache.coverageStart) > requiredStart.getTime()) {
+	if (
+		!cache ||
+		cache.timeZone !== deps.settings.timezone ||
+		Date.parse(cache.coverageStart) > requiredStart.getTime()
+	) {
 		return fullCalendarSync(deps, calendarId, requiredStart);
 	}
 	const accessToken = await getValidAccessToken(deps);
 	const params = new URLSearchParams({
 		syncToken: cache.syncToken,
+		timeZone: deps.settings.timezone,
 		singleEvents: "true",
 		showDeleted: "true",
 		maxResults: "2500",

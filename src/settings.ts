@@ -41,6 +41,7 @@ export interface CalendarHealth {
 export interface CalendarEventCache {
 	syncToken: string;
 	coverageStart: string;
+	timeZone: string;
 	updatedAt: number;
 	events: Record<string, Record<string, unknown>>;
 }
@@ -243,12 +244,13 @@ function normalizeCaches(value: unknown): Record<string, CalendarEventCache> {
 	if (!isRecord(value)) return {};
 	const caches: Record<string, CalendarEventCache> = {};
 	for (const [calendarId, item] of Object.entries(value)) {
-		if (!calendarId || !isRecord(item) || typeof item.syncToken !== "string" || !item.syncToken || typeof item.coverageStart !== "string" || !Number.isFinite(Date.parse(item.coverageStart)) || !isRecord(item.events)) continue;
+		if (!calendarId || !isRecord(item) || typeof item.syncToken !== "string" || !item.syncToken || typeof item.coverageStart !== "string" || !Number.isFinite(Date.parse(item.coverageStart)) || typeof item.timeZone !== "string" || !item.timeZone || !isRecord(item.events)) continue;
 		const events: Record<string, Record<string, unknown>> = {};
 		for (const [eventKey, event] of Object.entries(item.events)) if (eventKey && isRecord(event)) events[eventKey] = event;
 		caches[calendarId] = {
 			syncToken: item.syncToken,
 			coverageStart: item.coverageStart,
+			timeZone: item.timeZone,
 			updatedAt: optionalTimestamp(item.updatedAt) ?? Date.now(),
 			events,
 		};

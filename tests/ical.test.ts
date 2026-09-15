@@ -85,4 +85,91 @@ describe("iCalendar parsing", () => {
 			start: { dateTime: "2026-09-03T19:00:00.000Z" },
 		}));
 	});
+
+	it("keeps DTSTART's day when a yearly rule specifies only BYMONTH", () => {
+		const events = parseICalendar(
+			[
+				"BEGIN:VCALENDAR",
+				"BEGIN:VEVENT",
+				"UID:annual-1",
+				"DTSTART;VALUE=DATE:20260915",
+				"RRULE:FREQ=YEARLY;BYMONTH=9;COUNT=3",
+				"SUMMARY:Annual review",
+				"END:VEVENT",
+				"END:VCALENDAR",
+			].join("\r\n"),
+			new Date("2026-09-01T00:00:00Z"),
+			new Date("2026-10-01T00:00:00Z"),
+			"UTC"
+		);
+
+		expect(events.map((event) => event.start.date)).toEqual(["2026-09-15"]);
+	});
+
+	it("honors BYSETPOS when selecting the last weekday of each month", () => {
+		const events = parseICalendar(
+			[
+				"BEGIN:VCALENDAR",
+				"BEGIN:VEVENT",
+				"UID:month-end-1",
+				"DTSTART;VALUE=DATE:20260930",
+				"RRULE:FREQ=MONTHLY;BYDAY=MO,TU,WE,TH,FR;BYSETPOS=-1;COUNT=3",
+				"SUMMARY:Month end",
+				"END:VEVENT",
+				"END:VCALENDAR",
+			].join("\r\n"),
+			new Date("2026-09-01T00:00:00Z"),
+			new Date("2026-12-01T00:00:00Z"),
+			"UTC"
+		);
+
+		expect(events.map((event) => event.start.date)).toEqual([
+			"2026-09-30",
+			"2026-10-30",
+			"2026-11-30",
+		]);
+	});
+
+	it("keeps a timed recurrence at the same wall time across daylight-saving changes", () => {
+		const events = parseICalendar(
+			[
+				"BEGIN:VCALENDAR",
+				"BEGIN:VEVENT",
+				"UID:dst-1",
+				"DTSTART;TZID=America/Los_Angeles:20261031T090000",
+				"DTEND;TZID=America/Los_Angeles:20261031T100000",
+				"RRULE:FREQ=DAILY;COUNT=3",
+				"SUMMARY:Daily meeting",
+				"END:VEVENT",
+				"END:VCALENDAR",
+			].join("\r\n"),
+			new Date("2026-10-31T00:00:00Z"),
+			new Date("2026-11-03T23:59:59Z"),
+			"UTC"
+		);
+
+		expect(events.map((event) => event.start.dateTime)).toEqual([
+			"2026-10-31T16:00:00.000Z",
+			"2026-11-01T17:00:00.000Z",
+			"2026-11-02T17:00:00.000Z",
+		]);
+	});
+
+	it("fails invalid recurrence rules instead of silently approximating them", () => {
+		expect(() => parseICalendar(
+			[
+				"BEGIN:VCALENDAR",
+				"BEGIN:VEVENT",
+				"UID:invalid-rule-1",
+				"DTSTART;VALUE=DATE:20260915",
+				"RRULE:FREQ=FORTNIGHTLY;COUNT=3",
+				"SUMMARY:Invalid recurrence",
+				"END:VEVENT",
+				"END:VCALENDAR",
+			].join("\r\n"),
+			new Date("2026-09-01T00:00:00Z"),
+			new Date("2026-10-01T00:00:00Z"),
+			"UTC"
+		)).toThrow(/Could not expand recurrence for "Invalid recurrence"/);
+	});
 });

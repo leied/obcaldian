@@ -166,10 +166,11 @@ Under **Secret iCalendar feeds**, click **Add iCal feed**, name it, and paste it
 selected. It is never included in diagnostics or plugin `data.json`.
 
 This mode is read-only and does not need OAuth. DailyCalSync supports all-day and timed VEVENTs,
-folded/escaped text, `DURATION`, `EXDATE`, moved recurrence overrides, and bounded daily, weekly,
-monthly, and yearly `RRULE` expansion. Feeds must use HTTPS, are limited to 5 MB, and may expand to
-at most 5,000 occurrences in one sync range. Treat a Secret iCal URL like a password: anyone who
-has it can usually read that calendar.
+folded/escaped text, `DURATION`, recurrence dates/exclusions, moved recurrence overrides, and
+bounded RFC-style `RRULE` expansion (including selectors such as `BYSETPOS`). Invalid or unsupported
+recurrence values fail the feed sync instead of being approximated. Feeds must use HTTPS, are
+limited to 5 MB, and may expand to at most 5,000 occurrences in one sync range. Treat a Secret iCal
+URL like a password: anyone who has it can usually read that calendar.
 
 ## Commands
 
@@ -244,13 +245,15 @@ under **Unmatched calendar annotations** instead of being silently discarded.
 ## Sync safety and caching
 
 Calendar requests and every target note are preflighted before a write. The plan is checked again
-after preview; if a note changed meanwhile, sync stops safely. Vault failures trigger rollback of
-earlier writes. Transient quota/server errors use bounded retries with `Retry-After` support.
+after preview; if a note changed meanwhile, sync stops safely. Vault or final settings-persistence
+failures trigger rollback of earlier note writes. Transient quota/server errors use bounded retries
+with `Retry-After` support.
 
 The first Google sync builds a per-calendar event cache and stores Google's incremental token.
-Later syncs request changes only; an expired token automatically triggers a full rebuild. Secret
-iCalendar feeds are fetched as complete read-only documents and their parsed range is cached.
-Cache contents stay local in Obsidian's plugin data and can include event metadata.
+Later syncs request changes only; an expired token or configured-timezone change automatically
+triggers a full rebuild. Secret iCalendar feeds are fetched as complete read-only documents and
+their parsed range is cached. Cache contents stay local in Obsidian's plugin data and can include
+event metadata.
 
 ## Development
 

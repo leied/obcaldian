@@ -1,12 +1,12 @@
 import type { AuthDeps } from "./googleAuth";
 import type { GoogleEvent, GoogleEventAttendee } from "./googleCalendar";
 import { iCalRequest, assertSafeICalUrl } from "./network";
+import { RRule } from "rrule";
 import type { ICalCalendarConfig } from "./settings";
 import { isValidTimeZone, zonedDateTime } from "./timezone";
 
 const MAX_FEED_BYTES = 5_000_000;
 const MAX_EXPANDED_EVENTS = 5_000;
-const MAX_RECURRENCE_DAYS = 36_600;
 
 interface Property {
 	value: string;
@@ -22,16 +22,6 @@ interface ParsedDate {
 
 interface RawEvent {
 	properties: Map<string, Property[]>;
-}
-
-interface RecurrenceRule {
-	freq: "DAILY" | "WEEKLY" | "MONTHLY" | "YEARLY";
-	interval: number;
-	count?: number;
-	until?: Date;
-	byDay: string[];
-	byMonthDay: number[];
-	byMonth: number[];
 }
 
 function secretKey(calendarId: string): string {
@@ -160,85 +150,6 @@ function shiftDateKey(key: string, days: number): string {
 	return new Date(Date.UTC(year, month - 1, day + days)).toISOString().slice(0, 10);
 }
 
-function dateOrdinal(key: string): number {
-	return Math.floor(new Date(`${key}T00:00:00.000Z`).getTime() / 86_400_000);
-}
-
-function daysInMonth(year: number, month: number): number {
-	return new Date(Date.UTC(year, month, 0)).getUTCDate();
-}
-
-function localParts(key: string): { year: number; month: number; day: number; weekday: number } {
-	const [year, month, day] = key.split("-").map(Number);
-	return { year, month, day, weekday: new Date(Date.UTC(year, month - 1, day)).getUTCDay() };
-}
-
-const WEEKDAYS: Record<string, number> = { SU: 0, MO: 1, TU: 2, WE: 3, TH: 4, FR: 5, SA: 6 };
-
-function parseRule(property: Property | undefined, fallbackTimeZone: string): RecurrenceRule | null {
-	if (!property) return null;
-	const values = new Map(property.value.split(";").flatMap((part) => {
-		const index = part.indexOf("=");
-		return index > 0 ? [[part.slice(0, index).toUpperCase(), part.slice(index + 1)]] : [];
-	}));
-	const freq = values.get("FREQ");
-	if (freq !== "DAILY" && freq !== "WEEKLY" && freq !== "MONTHLY" && freq !== "YEARLY") return null;
-	const interval = Math.max(1, Number.parseInt(values.get("INTERVAL") ?? "1", 10) || 1);
-	const countValue = Number.parseInt(values.get("COUNT") ?? "", 10);
-	const untilValue = values.get("UNTIL");
-	const untilParsed = untilValue ? parseDate({ value: untilValue, params: {} }, fallbackTimeZone) : null;
-	const until = untilParsed
-		? new Date(untilParsed.date.getTime() + (untilParsed.allDay ? 86_400_000 - 1 : 0))
-		: undefined;
-	return {
-		freq,
-		interval,
-		...(countValue > 0 ? { count: countValue } : {}),
-		...(until ? { until } : {}),
-		byDay: (values.get("BYDAY") ?? "").split(",").filter(Boolean),
-		byMonthDay: (values.get("BYMONTHDAY") ?? "").split(",").filter(Boolean).map(Number).filter((value) => Number.isFinite(value) && value !== 0),
-		byMonth: (values.get("BYMONTH") ?? "").split(",").map(Number).filter((value) => value >= 1 && value <= 12),
-	};
-}
-
-function matchesByDay(key: string, byDay: string[]): boolean {
-	if (byDay.length === 0) return true;
-	const { year, month, day, weekday } = localParts(key);
-	return byDay.some((token) => {
-		const match = token.match(/^([+-]?\d+)?(SU|MO|TU|WE|TH|FR|SA)$/);
-		if (!match || WEEKDAYS[match[2]] !== weekday) return false;
-		if (!match[1]) return true;
-		const ordinal = Number(match[1]);
-		if (ordinal > 0) return Math.ceil(day / 7) === ordinal;
-		return Math.ceil((daysInMonth(year, month) - day + 1) / 7) === Math.abs(ordinal);
-	});
-}
-
-function recurrenceMatches(key: string, startKey: string, rule: RecurrenceRule): boolean {
-	const candidate = localParts(key);
-	const start = localParts(startKey);
-	const days = dateOrdinal(key) - dateOrdinal(startKey);
-	if (days < 0) return false;
-	if (rule.byMonth.length > 0 && !rule.byMonth.includes(candidate.month)) return false;
-	if (rule.byMonthDay.length > 0 && !rule.byMonthDay.some((value) => value === candidate.day || (value < 0 && daysInMonth(candidate.year, candidate.month) + value + 1 === candidate.day))) return false;
-	if (!matchesByDay(key, rule.byDay)) return false;
-	if (rule.freq === "DAILY") return days % rule.interval === 0;
-	if (rule.freq === "WEEKLY") {
-		if (Math.floor(days / 7) % rule.interval !== 0) return false;
-		return rule.byDay.length > 0 || candidate.weekday === start.weekday;
-	}
-	const months = (candidate.year - start.year) * 12 + candidate.month - start.month;
-	if (rule.freq === "MONTHLY") {
-		if (months < 0 || months % rule.interval !== 0) return false;
-		return rule.byMonthDay.length > 0 || rule.byDay.length > 0 || candidate.day === start.day;
-	}
-	const years = candidate.year - start.year;
-	if (years < 0 || years % rule.interval !== 0) return false;
-	return rule.byMonth.length > 0 || rule.byMonthDay.length > 0 || rule.byDay.length > 0
-		? true
-		: candidate.month === start.month && candidate.day === start.day;
-}
-
 function durationMilliseconds(event: RawEvent, start: ParsedDate, end: ParsedDate | null): number {
 	if (end) return Math.max(1, end.date.getTime() - start.date.getTime());
 	const duration = first(event, "DURATION")?.value;
@@ -247,12 +158,149 @@ function durationMilliseconds(event: RawEvent, start: ParsedDate, end: ParsedDat
 	return start.allDay ? 86_400_000 : 3_600_000;
 }
 
-function occurrenceDate(start: ParsedDate, candidateKey: string): ParsedDate {
-	if (start.allDay) return { ...start, dateKey: candidateKey, date: new Date(`${candidateKey}T00:00:00.000Z`) };
-	const [year, month, day] = candidateKey.split("-").map(Number);
-	const formatted = new Intl.DateTimeFormat("en-US", { timeZone: start.timeZone, hourCycle: "h23", hour: "2-digit", minute: "2-digit", second: "2-digit" }).formatToParts(start.date);
-	const parts = Object.fromEntries(formatted.filter((part) => part.type !== "literal").map((part) => [part.type, part.value]));
-	return { ...start, dateKey: candidateKey, date: zonedDateTime(year, month, day, Number(parts.hour) % 24, Number(parts.minute), Number(parts.second), start.timeZone) };
+function wallDateAt(date: Date, timeZone: string): Date {
+	const formatted = new Intl.DateTimeFormat("en-US", {
+		timeZone,
+		hourCycle: "h23",
+		year: "numeric",
+		month: "2-digit",
+		day: "2-digit",
+		hour: "2-digit",
+		minute: "2-digit",
+		second: "2-digit",
+	}).formatToParts(date);
+	const parts = Object.fromEntries(
+		formatted.filter((part) => part.type !== "literal").map((part) => [part.type, part.value])
+	);
+	return new Date(Date.UTC(
+		Number(parts.year),
+		Number(parts.month) - 1,
+		Number(parts.day),
+		Number(parts.hour) % 24,
+		Number(parts.minute),
+		Number(parts.second)
+	));
+}
+
+function recurrenceWallDate(date: ParsedDate, recurrenceTimeZone: string): Date {
+	if (date.allDay) return new Date(`${date.dateKey}T00:00:00.000Z`);
+	return wallDateAt(date.date, recurrenceTimeZone);
+}
+
+function occurrenceDate(start: ParsedDate, wallDate: Date): ParsedDate {
+	const year = wallDate.getUTCFullYear();
+	const month = wallDate.getUTCMonth() + 1;
+	const day = wallDate.getUTCDate();
+	const key = dateKey(year, month, day);
+	if (start.allDay) {
+		return { ...start, dateKey: key, date: new Date(`${key}T00:00:00.000Z`) };
+	}
+	return {
+		...start,
+		dateKey: key,
+		date: zonedDateTime(
+			year,
+			month,
+			day,
+			wallDate.getUTCHours(),
+			wallDate.getUTCMinutes(),
+			wallDate.getUTCSeconds(),
+			start.timeZone
+		),
+	};
+}
+
+function normalizeRule(property: Property, start: ParsedDate): RRule {
+	const options = RRule.parseString(property.value);
+	options.dtstart = recurrenceWallDate(start, start.timeZone);
+	options.tzid = null;
+	const untilValue = property.value.match(/(?:^|;)UNTIL=([^;]+)/i)?.[1];
+	if (untilValue) {
+		const parsedUntil = parseDate({
+			value: untilValue,
+			params: untilValue.endsWith("Z") ? {} : start.allDay ? { VALUE: "DATE" } : { TZID: start.timeZone },
+		}, start.timeZone);
+		if (!parsedUntil) throw new Error(`Invalid recurrence UNTIL value: ${untilValue}`);
+		options.until = recurrenceWallDate(parsedUntil, start.timeZone);
+	}
+	return new RRule(options, true);
+}
+
+function recurrenceDates(
+	raw: RawEvent,
+	start: ParsedDate,
+	rangeStart: Date,
+	rangeEnd: Date,
+	durationMs: number,
+	remaining: number
+): ParsedDate[] | null {
+	const rules = raw.properties.get("RRULE") ?? [];
+	const exclusionRules = raw.properties.get("EXRULE") ?? [];
+	const recurrenceDates = raw.properties.get("RDATE") ?? [];
+	if (rules.length === 0 && exclusionRules.length === 0 && recurrenceDates.length === 0) return null;
+	try {
+		const included = new Map<number, Date>();
+		const excluded = new Set<number>();
+		let generated = 0;
+		const addRuleDates = (property: Property, target: Map<number, Date> | Set<number>): void => {
+			const dates = normalizeRule(property, start).between(
+				queryStart,
+				queryEnd,
+				true,
+				() => {
+					generated += 1;
+					return generated <= MAX_EXPANDED_EVENTS;
+				}
+			);
+			if (generated > MAX_EXPANDED_EVENTS) {
+				throw new Error(`The iCalendar feed expands beyond ${MAX_EXPANDED_EVENTS} events for this range.`);
+			}
+			for (const date of dates) {
+				if (target instanceof Map) target.set(date.getTime(), date);
+				else target.add(date.getTime());
+			}
+		};
+		// RRule operates on UTC-shaped wall-clock values. Two days of padding covers
+		// every IANA offset; duration padding also includes events already in progress.
+		const queryStart = new Date(rangeStart.getTime() - durationMs - 2 * 86_400_000);
+		const queryEnd = new Date(rangeEnd.getTime() + 2 * 86_400_000);
+		for (const property of rules) addRuleDates(property, included);
+		for (const property of exclusionRules) addRuleDates(property, excluded);
+		const firstWall = recurrenceWallDate(start, start.timeZone);
+		included.set(firstWall.getTime(), firstWall);
+		for (const property of recurrenceDates) {
+			for (const value of property.value.split(",")) {
+				generated += 1;
+				if (generated > MAX_EXPANDED_EVENTS) {
+					throw new Error(`The iCalendar feed expands beyond ${MAX_EXPANDED_EVENTS} events for this range.`);
+				}
+				const parsed = parseDate({ ...property, value }, start.timeZone);
+				if (!parsed) throw new Error(`Unsupported or invalid RDATE value: ${value}`);
+				const wall = recurrenceWallDate(parsed, start.timeZone);
+				included.set(wall.getTime(), wall);
+			}
+		}
+		for (const property of raw.properties.get("EXDATE") ?? []) {
+			for (const value of property.value.split(",")) {
+				const parsed = parseDate({ ...property, value }, start.timeZone);
+				if (!parsed) throw new Error(`Unsupported or invalid EXDATE value: ${value}`);
+				excluded.add(recurrenceWallDate(parsed, start.timeZone).getTime());
+			}
+		}
+		const walls = [...included]
+			.filter(([timestamp]) => !excluded.has(timestamp))
+			.map(([, date]) => date)
+			.sort((left, right) => left.getTime() - right.getTime());
+		if (walls.length > remaining) {
+			throw new Error(`The iCalendar feed expands beyond ${MAX_EXPANDED_EVENTS} events for this range.`);
+		}
+		return walls.map((wall) => occurrenceDate(start, wall));
+	} catch (error) {
+		if (error instanceof Error && error.message.includes("expands beyond")) throw error;
+		const summary = unescapeText(first(raw, "SUMMARY")?.value ?? "(untitled event)");
+		const detail = error instanceof Error ? error.message : String(error);
+		throw new Error(`Could not expand recurrence for "${summary}": ${detail}`);
+	}
 }
 
 function attendee(property: Property): GoogleEventAttendee | null {
@@ -318,28 +366,21 @@ export function parseICalendar(text: string, rangeStart: Date, rangeEnd: Date, f
 		if (!start) continue;
 		const end = first(raw, "DTEND") ? parseDate(first(raw, "DTEND") as Property, fallbackTimeZone) : null;
 		const durationMs = durationMilliseconds(raw, start, end);
-		const rule = parseRule(first(raw, "RRULE"), fallbackTimeZone);
-		const exclusions = new Set((raw.properties.get("EXDATE") ?? []).flatMap((property) => property.value.split(",").flatMap((value) => {
-			const parsed = parseDate({ ...property, value }, fallbackTimeZone);
-			return parsed ? [occurrenceIdentity(parsed)] : [];
-		})));
-		if (!rule) {
+		const occurrences = recurrenceDates(
+			raw,
+			start,
+			rangeStart,
+			rangeEnd,
+			durationMs,
+			MAX_EXPANDED_EVENTS - results.length
+		);
+		if (!occurrences) {
 			const event = toGoogleEvent(raw, uid, start, start, durationMs, false);
 			if (start.date.getTime() < rangeEnd.getTime() && start.date.getTime() + durationMs > rangeStart.getTime()) results.push(event);
 			continue;
 		}
-		let emitted = 0;
-		const startOrdinal = dateOrdinal(start.dateKey);
-		const scanEnd = Math.min(dateOrdinal(rangeEnd.toISOString().slice(0, 10)) + 2, startOrdinal + MAX_RECURRENCE_DAYS);
-		for (let ordinal = startOrdinal; ordinal <= scanEnd && results.length < MAX_EXPANDED_EVENTS; ordinal += 1) {
-			const candidateKey = new Date(ordinal * 86_400_000).toISOString().slice(0, 10);
-			if (!recurrenceMatches(candidateKey, start.dateKey, rule)) continue;
-			const candidate = occurrenceDate(start, candidateKey);
-			if (rule.until && candidate.date.getTime() > rule.until.getTime()) break;
-			emitted += 1;
-			if (rule.count && emitted > rule.count) break;
+		for (const candidate of occurrences) {
 			const identity = occurrenceIdentity(candidate);
-			if (exclusions.has(identity)) continue;
 			const override = overrides.get(`${uid}::${identity}`);
 			const actualStart = override && first(override, "DTSTART") ? parseDate(first(override, "DTSTART") as Property, fallbackTimeZone) ?? candidate : candidate;
 			const actualEnd = override && first(override, "DTEND") ? parseDate(first(override, "DTEND") as Property, fallbackTimeZone) : null;
@@ -351,7 +392,7 @@ export function parseICalendar(text: string, rangeStart: Date, rangeEnd: Date, f
 			}
 		}
 	}
-	if (results.length >= MAX_EXPANDED_EVENTS) throw new Error(`The iCalendar feed expands beyond ${MAX_EXPANDED_EVENTS} events for this range.`);
+	if (results.length > MAX_EXPANDED_EVENTS) throw new Error(`The iCalendar feed expands beyond ${MAX_EXPANDED_EVENTS} events for this range.`);
 	return results;
 }
 

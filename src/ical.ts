@@ -2,11 +2,27 @@ import type { AuthDeps } from "./googleAuth";
 import type { GoogleEvent, GoogleEventAttendee } from "./googleCalendar";
 import { iCalRequest, assertSafeICalUrl } from "./network";
 import { RRule } from "rrule";
+import type { Options as RRuleOptions } from "rrule";
 import type { ICalCalendarConfig } from "./settings";
-import { isValidTimeZone, zonedDateTime } from "./timezone";
+import { isValidTimeZone, wallClockFormatter, zonedDateTime } from "./timezone";
 
 const MAX_FEED_BYTES = 5_000_000;
 const MAX_EXPANDED_EVENTS = 5_000;
+/**
+ * Hard ceiling on recurrence periods walked while expanding one feed. Expansion
+ * is synchronous on Obsidian's only thread and `rrule` visits every period from
+ * DTSTART onward, so a sub-daily `FREQ` or a rule whose selectors can never
+ * match (`FREQ=DAILY;BYMONTH=2;BYMONTHDAY=30`) would otherwise block the UI for
+ * minutes. `clampedDtstart` keeps well-formed feeds orders of magnitude below
+ * this, so reaching it means the feed is malformed rather than merely large.
+ */
+const MAX_RECURRENCE_PERIODS = 200_000;
+
+const EXPANSION_LIMIT_MESSAGE =
+	`The iCalendar feed expands beyond ${MAX_EXPANDED_EVENTS} events for this range.`;
+
+/** Thrown for safety limits, which describe the feed rather than one event. */
+class RecurrenceLimitError extends Error {}
 
 interface Property {
 	value: string;
@@ -159,16 +175,7 @@ function durationMilliseconds(event: RawEvent, start: ParsedDate, end: ParsedDat
 }
 
 function wallDateAt(date: Date, timeZone: string): Date {
-	const formatted = new Intl.DateTimeFormat("en-US", {
-		timeZone,
-		hourCycle: "h23",
-		year: "numeric",
-		month: "2-digit",
-		day: "2-digit",
-		hour: "2-digit",
-		minute: "2-digit",
-		second: "2-digit",
-	}).formatToParts(date);
+	const formatted = wallClockFormatter(timeZone).formatToParts(date);
 	const parts = Object.fromEntries(
 		formatted.filter((part) => part.type !== "literal").map((part) => [part.type, part.value])
 	);
@@ -210,9 +217,130 @@ function occurrenceDate(start: ParsedDate, wallDate: Date): ParsedDate {
 	};
 }
 
-function normalizeRule(property: Property, start: ParsedDate): RRule {
+/** Milliseconds per period for the frequencies whose period is a fixed length. */
+const FIXED_PERIOD_MS: Partial<Record<number, number>> = {
+	[RRule.DAILY]: 86_400_000,
+	[RRule.WEEKLY]: 7 * 86_400_000,
+};
+
+const FREQUENCY_NAMES: Partial<Record<number, string>> = {
+	[RRule.HOURLY]: "HOURLY",
+	[RRule.MINUTELY]: "MINUTELY",
+	[RRule.SECONDLY]: "SECONDLY",
+};
+
+/**
+ * Rejects sub-daily frequencies, which a daily note cannot usefully represent
+ * and which the pre-`rrule` parser never accepted either.
+ *
+ * This is also the one bound that cannot be enforced after the fact: `rrule`
+ * only compares UNTIL against candidates that survive the BY* filters, so a
+ * rule whose selectors can never match (`BYMONTH=2;BYMONTHDAY=30`) walks every
+ * period from DTSTART to year 9999 without ever calling back. At DAILY that is
+ * a few seconds; at SECONDLY it would never finish.
+ */
+function assertExpandableFrequency(options: Partial<RRuleOptions>): void {
+	const name = options.freq === undefined || options.freq === null
+		? undefined
+		: FREQUENCY_NAMES[options.freq];
+	if (name) {
+		throw new Error(`FREQ=${name} recurrence is not supported in daily notes.`);
+	}
+}
+
+/** Longest possible length of each month; February allows for leap years. */
+const LONGEST_MONTH_LENGTHS = [31, 29, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31];
+
+function numberList(value: number | number[] | null | undefined): number[] {
+	if (value === null || value === undefined) return [];
+	return (Array.isArray(value) ? value : [value]).filter((item) => Number.isInteger(item));
+}
+
+/**
+ * Rejects BYMONTH/BYMONTHDAY pairs that no calendar date can satisfy, such as
+ * `BYMONTH=2;BYMONTHDAY=30`. For the same reason as `assertExpandableFrequency`,
+ * `rrule` cannot discover this itself: with nothing surviving the filters it
+ * never reaches its UNTIL check and walks to year 9999 instead.
+ *
+ * Deliberately conservative — it only looks at whether a month can contain the
+ * requested day, so it can never reject a rule that some date does satisfy.
+ */
+function assertSatisfiableMonthDays(options: Partial<RRuleOptions>): void {
+	const monthDays = numberList(options.bymonthday);
+	if (monthDays.length === 0) return;
+	const months = numberList(options.bymonth).filter((month) => month >= 1 && month <= 12);
+	const candidateMonths = months.length > 0 ? months : LONGEST_MONTH_LENGTHS.map((_, index) => index + 1);
+	const satisfiable = candidateMonths.some((month) => {
+		const longest = LONGEST_MONTH_LENGTHS[month - 1];
+		return monthDays.some((day) => day !== 0 && Math.abs(day) <= longest);
+	});
+	if (!satisfiable) {
+		throw new Error("Recurrence selects a month day that no month in BYMONTH contains.");
+	}
+}
+
+function addUtcMonths(date: Date, months: number): Date | null {
+	const day = date.getUTCDate();
+	const shifted = new Date(Date.UTC(
+		date.getUTCFullYear(),
+		date.getUTCMonth() + months,
+		day,
+		date.getUTCHours(),
+		date.getUTCMinutes(),
+		date.getUTCSeconds(),
+		date.getUTCMilliseconds()
+	));
+	// Date.UTC rolls a nonexistent day into the next month (Feb 31 becomes Mar 3),
+	// which would change the month day MONTHLY/YEARLY rules infer from DTSTART.
+	return shifted.getUTCDate() === day ? shifted : null;
+}
+
+/**
+ * Advances DTSTART forward by whole recurrence periods so expansion begins just
+ * before the queried window instead of walking every period since the series
+ * began — a weekly meeting standing since 2015 costs a handful of periods
+ * instead of six hundred.
+ *
+ * Stepping by a whole multiple of INTERVAL preserves both the interval
+ * alignment and the BY* parts rrule infers from DTSTART, so every occurrence
+ * inside the window is unchanged. COUNT is anchored to the real DTSTART, so
+ * those rules are left alone; they are self-limiting anyway.
+ */
+function clampedDtstart(options: Partial<RRuleOptions>, dtstart: Date, queryStart: Date): Date {
+	if (options.count !== undefined && options.count !== null) return dtstart;
+	if (options.freq === undefined || options.freq === null) return dtstart;
+	const behindMs = queryStart.getTime() - dtstart.getTime();
+	if (behindMs <= 0) return dtstart;
+	const interval = Math.max(1, options.interval ?? 1);
+	const fixedPeriodMs = FIXED_PERIOD_MS[options.freq];
+	if (fixedPeriodMs !== undefined) {
+		const stepMs = fixedPeriodMs * interval;
+		const periods = Math.floor(behindMs / stepMs);
+		return periods > 0 ? new Date(dtstart.getTime() + periods * stepMs) : dtstart;
+	}
+	const monthsPerPeriod =
+		options.freq === RRule.MONTHLY ? interval
+		: options.freq === RRule.YEARLY ? interval * 12
+		: 0;
+	if (monthsPerPeriod === 0) return dtstart;
+	const monthsBehind =
+		(queryStart.getUTCFullYear() - dtstart.getUTCFullYear()) * 12
+		+ queryStart.getUTCMonth() - dtstart.getUTCMonth();
+	let periods = Math.floor(monthsBehind / monthsPerPeriod);
+	// A Feb 29 or day-31 DTSTART cannot land on every period boundary; step back
+	// until one exists. Bounded so a hostile DTSTART cannot spin here either.
+	for (let attempt = 0; attempt < 24 && periods > 0; attempt += 1, periods -= 1) {
+		const shifted = addUtcMonths(dtstart, periods * monthsPerPeriod);
+		if (shifted && shifted.getTime() <= queryStart.getTime()) return shifted;
+	}
+	return dtstart;
+}
+
+function normalizeRule(property: Property, start: ParsedDate, queryStart: Date): RRule {
 	const options = RRule.parseString(property.value);
-	options.dtstart = recurrenceWallDate(start, start.timeZone);
+	assertExpandableFrequency(options);
+	assertSatisfiableMonthDays(options);
+	const dtstart = recurrenceWallDate(start, start.timeZone);
 	options.tzid = null;
 	const untilValue = property.value.match(/(?:^|;)UNTIL=([^;]+)/i)?.[1];
 	if (untilValue) {
@@ -223,7 +351,13 @@ function normalizeRule(property: Property, start: ParsedDate): RRule {
 		if (!parsedUntil) throw new Error(`Invalid recurrence UNTIL value: ${untilValue}`);
 		options.until = recurrenceWallDate(parsedUntil, start.timeZone);
 	}
+	options.dtstart = clampedDtstart(options, dtstart, queryStart);
 	return new RRule(options, true);
+}
+
+/** Mutable per-feed allowance shared by every event's recurrence expansion. */
+interface ExpansionBudget {
+	periods: number;
 }
 
 function recurrenceDates(
@@ -232,38 +366,46 @@ function recurrenceDates(
 	rangeStart: Date,
 	rangeEnd: Date,
 	durationMs: number,
-	remaining: number
+	remaining: number,
+	budget: ExpansionBudget
 ): ParsedDate[] | null {
 	const rules = raw.properties.get("RRULE") ?? [];
 	const exclusionRules = raw.properties.get("EXRULE") ?? [];
 	const recurrenceDates = raw.properties.get("RDATE") ?? [];
 	if (rules.length === 0 && exclusionRules.length === 0 && recurrenceDates.length === 0) return null;
+	// RRule operates on UTC-shaped wall-clock values. Two days of padding covers
+	// every IANA offset; duration padding also includes events already in progress.
+	const queryStart = new Date(rangeStart.getTime() - durationMs - 2 * 86_400_000);
+	const queryEnd = new Date(rangeEnd.getTime() + 2 * 86_400_000);
 	try {
 		const included = new Map<number, Date>();
 		const excluded = new Set<number>();
 		let generated = 0;
 		const addRuleDates = (property: Property, target: Map<number, Date> | Set<number>): void => {
-			const dates = normalizeRule(property, start).between(
-				queryStart,
-				queryEnd,
-				true,
-				() => {
-					generated += 1;
-					return generated <= MAX_EXPANDED_EVENTS;
+			const startMs = queryStart.getTime();
+			const endMs = queryEnd.getTime();
+			// `all` reports every period rrule walks, unlike `between`, which only
+			// reports the ones already inside the window — that is what makes the
+			// period budget below an actual bound on the work done.
+			normalizeRule(property, start, queryStart).all((date) => {
+				budget.periods -= 1;
+				if (budget.periods < 0) {
+					throw new RecurrenceLimitError(
+						"The iCalendar feed has a recurrence rule too expensive to expand safely."
+					);
 				}
-			);
-			if (generated > MAX_EXPANDED_EVENTS) {
-				throw new Error(`The iCalendar feed expands beyond ${MAX_EXPANDED_EVENTS} events for this range.`);
-			}
-			for (const date of dates) {
-				if (target instanceof Map) target.set(date.getTime(), date);
-				else target.add(date.getTime());
-			}
+				const timestamp = date.getTime();
+				if (timestamp > endMs) return false;
+				if (timestamp < startMs) return true;
+				generated += 1;
+				if (generated > MAX_EXPANDED_EVENTS) {
+					throw new RecurrenceLimitError(EXPANSION_LIMIT_MESSAGE);
+				}
+				if (target instanceof Map) target.set(timestamp, date);
+				else target.add(timestamp);
+				return true;
+			});
 		};
-		// RRule operates on UTC-shaped wall-clock values. Two days of padding covers
-		// every IANA offset; duration padding also includes events already in progress.
-		const queryStart = new Date(rangeStart.getTime() - durationMs - 2 * 86_400_000);
-		const queryEnd = new Date(rangeEnd.getTime() + 2 * 86_400_000);
 		for (const property of rules) addRuleDates(property, included);
 		for (const property of exclusionRules) addRuleDates(property, excluded);
 		const firstWall = recurrenceWallDate(start, start.timeZone);
@@ -272,7 +414,7 @@ function recurrenceDates(
 			for (const value of property.value.split(",")) {
 				generated += 1;
 				if (generated > MAX_EXPANDED_EVENTS) {
-					throw new Error(`The iCalendar feed expands beyond ${MAX_EXPANDED_EVENTS} events for this range.`);
+					throw new RecurrenceLimitError(EXPANSION_LIMIT_MESSAGE);
 				}
 				const parsed = parseDate({ ...property, value }, start.timeZone);
 				if (!parsed) throw new Error(`Unsupported or invalid RDATE value: ${value}`);
@@ -291,12 +433,10 @@ function recurrenceDates(
 			.filter(([timestamp]) => !excluded.has(timestamp))
 			.map(([, date]) => date)
 			.sort((left, right) => left.getTime() - right.getTime());
-		if (walls.length > remaining) {
-			throw new Error(`The iCalendar feed expands beyond ${MAX_EXPANDED_EVENTS} events for this range.`);
-		}
+		if (walls.length > remaining) throw new RecurrenceLimitError(EXPANSION_LIMIT_MESSAGE);
 		return walls.map((wall) => occurrenceDate(start, wall));
 	} catch (error) {
-		if (error instanceof Error && error.message.includes("expands beyond")) throw error;
+		if (error instanceof RecurrenceLimitError) throw error;
 		const summary = unescapeText(first(raw, "SUMMARY")?.value ?? "(untitled event)");
 		const detail = error instanceof Error ? error.message : String(error);
 		throw new Error(`Could not expand recurrence for "${summary}": ${detail}`);
@@ -357,6 +497,7 @@ export function parseICalendar(text: string, rangeStart: Date, rangeEnd: Date, f
 		if (uid && parsed) overrides.set(`${uid}::${occurrenceIdentity(parsed)}`, event);
 	}
 	const results: GoogleEvent[] = [];
+	const budget: ExpansionBudget = { periods: MAX_RECURRENCE_PERIODS };
 	for (const raw of rawEvents) {
 		if (first(raw, "RECURRENCE-ID")) continue;
 		const uid = first(raw, "UID")?.value.trim();
@@ -372,7 +513,8 @@ export function parseICalendar(text: string, rangeStart: Date, rangeEnd: Date, f
 			rangeStart,
 			rangeEnd,
 			durationMs,
-			MAX_EXPANDED_EVENTS - results.length
+			MAX_EXPANDED_EVENTS - results.length,
+			budget
 		);
 		if (!occurrences) {
 			const event = toGoogleEvent(raw, uid, start, start, durationMs, false);
@@ -392,7 +534,7 @@ export function parseICalendar(text: string, rangeStart: Date, rangeEnd: Date, f
 			}
 		}
 	}
-	if (results.length > MAX_EXPANDED_EVENTS) throw new Error(`The iCalendar feed expands beyond ${MAX_EXPANDED_EVENTS} events for this range.`);
+	if (results.length > MAX_EXPANDED_EVENTS) throw new RecurrenceLimitError(EXPANSION_LIMIT_MESSAGE);
 	return results;
 }
 

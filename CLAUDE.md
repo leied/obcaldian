@@ -99,10 +99,30 @@ Module responsibilities in `src/`, in dependency order:
   cancellable retries.
 - **`ical.ts`** — SecretStorage URL access, defensive ICS parsing, and bounded RFC-style recurrence
   expansion via `rrule`. Invalid/unsupported recurrence values fail the feed sync instead of being
-  silently approximated.
+  silently approximated. Expansion is synchronous on Obsidian's only thread, and `rrule` walks every
+  period from DTSTART onward, so three bounds keep a malformed feed from freezing the UI:
+  - `clampedDtstart` advances DTSTART forward by whole INTERVAL periods so a series standing since
+    2015 costs a handful of periods instead of hundreds. Stepping by a whole multiple of INTERVAL
+    preserves both the interval alignment and the BY* parts `rrule` infers from DTSTART, so
+    occurrences inside the window are unchanged; COUNT rules are anchored to the real DTSTART and
+    are left alone. `tests/ical.test.ts` pins this by differentially comparing every clamped rule
+    shape against its unclamped `rrule` expansion — change the clamp and those tests fail.
+  - `assertExpandableFrequency` rejects sub-daily `FREQ` (`HOURLY`/`MINUTELY`/`SECONDLY`), which a
+    daily note cannot usefully represent and which the pre-`rrule` parser never accepted either;
+    `assertSatisfiableMonthDays` rejects BYMONTH/BYMONTHDAY pairs no date can satisfy. Both must
+    reject *before* expansion: `rrule` only compares UNTIL against candidates that survive the BY*
+    filters, so a rule that never matches walks to year 9999 without ever calling back, which no
+    observational budget can catch.
+  - `MAX_RECURRENCE_PERIODS` is a per-feed allowance on periods walked, threaded through
+    `parseICalendar` as an `ExpansionBudget` so one feed cannot spend it event by event. Expansion
+    uses `RRule.all` rather than `between` precisely because `all` reports every period walked,
+    while `between` only reports the ones already inside the window.
 - **`timezone.ts`** — pure, no Obsidian dependency. `zonedDayRange(year, month, day, timeZone)`
   resolves the UTC instants for midnight-to-midnight of a given calendar day in an arbitrary IANA
-  zone, via `Intl.DateTimeFormat` offset reconstruction (no `moment-timezone` dependency). Used so
+  zone, via `Intl.DateTimeFormat` offset reconstruction (no `moment-timezone` dependency).
+  `wallClockFormatter` memoizes those formatters per zone — constructing one costs far more than
+  formatting with it, and recurrence expansion resolves thousands of instants against the same
+  handful of zones. Used so
   Google Calendar day-boundary queries align with the user's configured `timezone` setting rather
   than assuming it matches the machine's local zone. `isValidTimeZone` backs the settings-tab inline
   validation (see below).

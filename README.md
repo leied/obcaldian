@@ -167,7 +167,9 @@ selected. It is never included in diagnostics or plugin `data.json`.
 
 This mode is read-only and does not need OAuth. DailyCalSync supports all-day and timed VEVENTs,
 folded/escaped text, `DURATION`, recurrence dates/exclusions, moved recurrence overrides, and
-bounded RFC-style `RRULE` expansion (including selectors such as `BYSETPOS`). Invalid or unsupported
+bounded RFC-style `RRULE` expansion (including selectors such as `BYSETPOS`). Daily, weekly,
+monthly, and yearly recurrence is expanded; sub-daily `FREQ` (`HOURLY`, `MINUTELY`, `SECONDLY`) is
+rejected, since a daily note cannot usefully list it. Invalid, unsupported, or unsatisfiable
 recurrence values fail the feed sync instead of being approximated. Feeds must use HTTPS, are
 limited to 5 MB, and may expand to at most 5,000 occurrences in one sync range. Treat a Secret iCal
 URL like a password: anyone who has it can usually read that calendar.

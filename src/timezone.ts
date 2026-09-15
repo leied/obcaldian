@@ -1,6 +1,14 @@
-/** Returns the UTC offset, in minutes, of `timeZone` at the instant `epochMs`. */
-function offsetMinutesAt(epochMs: number, timeZone: string): number {
-	const dtf = new Intl.DateTimeFormat("en-US", {
+const wallClockFormatters = new Map<string, Intl.DateTimeFormat>();
+
+/**
+ * Returns a cached wall-clock formatter for `timeZone`. Constructing an
+ * `Intl.DateTimeFormat` costs far more than formatting with one, and recurrence
+ * expansion resolves thousands of instants against the same handful of zones.
+ */
+export function wallClockFormatter(timeZone: string): Intl.DateTimeFormat {
+	const cached = wallClockFormatters.get(timeZone);
+	if (cached) return cached;
+	const formatter = new Intl.DateTimeFormat("en-US", {
 		timeZone,
 		hourCycle: "h23",
 		year: "numeric",
@@ -10,6 +18,13 @@ function offsetMinutesAt(epochMs: number, timeZone: string): number {
 		minute: "2-digit",
 		second: "2-digit",
 	});
+	wallClockFormatters.set(timeZone, formatter);
+	return formatter;
+}
+
+/** Returns the UTC offset, in minutes, of `timeZone` at the instant `epochMs`. */
+function offsetMinutesAt(epochMs: number, timeZone: string): number {
+	const dtf = wallClockFormatter(timeZone);
 	const parts: Record<string, string> = {};
 	for (const part of dtf.formatToParts(new Date(epochMs))) {
 		if (part.type !== "literal") parts[part.type] = part.value;

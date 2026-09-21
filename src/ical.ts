@@ -439,7 +439,7 @@ function recurrenceDates(
 		if (error instanceof RecurrenceLimitError) throw error;
 		const summary = unescapeText(first(raw, "SUMMARY")?.value ?? "(untitled event)");
 		const detail = error instanceof Error ? error.message : String(error);
-		throw new Error(`Could not expand recurrence for "${summary}": ${detail}`);
+		throw new Error(`Could not expand recurrence for "${summary}": ${detail}`, { cause: error });
 	}
 }
 

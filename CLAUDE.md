@@ -25,10 +25,12 @@ never edit it directly; edit `src/*.ts`.
 
 `npm run check` runs lint, build, tests, and release validation in CI on Node 20 and 22. A separate
 matrix compiles against Obsidian 1.11.4 and the latest API, and the Node 20 job uploads an
-installable artifact. Pushing any tag
-triggers `.github/workflows/release.yml`, which requires the tag to equal the manifest version,
-builds, tests, validates, attests the artifacts, and creates a draft GitHub Release with `main.js`,
-`manifest.json`, `styles.css`, and a zipped copy.
+installable artifact. `.github/workflows/version-bump.yml` provides a manual patch/minor/major
+release action: it runs `npm version`, validates the result, pushes the release commit and tag, and
+dispatches `.github/workflows/release.yml`. The release workflow also accepts externally pushed
+tags, requires the tag to equal the manifest version, builds, tests, validates, attests the
+artifacts, and publishes a GitHub Release with `main.js`, `manifest.json`, `styles.css`, and a
+zipped copy.
 
 To manually exercise the plugin, symlink or copy this repo (built) into an Obsidian vault's
 `.obsidian/plugins/dailycalsync/` folder and enable it in Obsidian's Community Plugins settings.

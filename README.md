@@ -265,6 +265,8 @@ event metadata.
 - `npm test` — runs the test suite.
 - `npm run validate:release` — validates publication files and version metadata after a build.
 - `npm run check` — runs the production build, tests, and release validation used by CI.
+- `npm version <patch|minor|major>` — bumps `package.json`, synchronizes `manifest.json` and
+  `versions.json`, and creates the local release commit and tag.
 - `node scripts/generate-test-ical.mjs [--out=test-calendar.ics] [--start=YYYY-MM-DD]` — writes an
   `.ics` file of test events (footnote thresholds, multi-day spans, filtered/private/cancelled
   events, escaping edge cases, and recurrence with a skipped and a moved occurrence) for manually
@@ -273,8 +275,10 @@ event metadata.
   `tests/generate-test-ical.test.ts`, which runs as part of `npm test`/CI.
 
 CI tests Node.js 20 and 22, compiles against Obsidian 1.11.4 and the latest API, and uploads an
-installable plugin artifact. Tag builds additionally
-require the tag to exactly match `manifest.json`, generate a provenance attestation, and create a
-draft GitHub release for final review.
+installable plugin artifact. To publish a release, run **Bump version and release** from GitHub
+Actions and choose `patch`, `minor`, or `major`. It updates and pushes all version metadata and the
+tag, then starts the release workflow. Tag builds require the tag to exactly match `manifest.json`,
+generate provenance attestations, and publish `main.js`, `manifest.json`, `styles.css`, and the
+installable zip as GitHub Release assets.
 
 See `CLAUDE.md` for an architecture overview if you're working on the plugin itself.

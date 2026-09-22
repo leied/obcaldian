@@ -159,6 +159,49 @@ describe("incremental calendar cache", () => {
 		vi.useRealTimers();
 	});
 
+	it("drops cancelled instances of a deleted series but keeps other cancellations", async () => {
+		const auth = deps();
+		const instance = (id: string, series: string | undefined, day: string, status: string) => ({
+			id,
+			summary: `${status} ${id}`,
+			status,
+			...(series ? { recurringEventId: series } : {}),
+			originalStartTime: { dateTime: `2026-07-${day}T13:00:00Z` },
+			start: { dateTime: `2026-07-${day}T13:00:00Z` },
+			end: { dateTime: `2026-07-${day}T14:00:00Z` },
+		});
+		vi.mocked(requestUrl)
+			.mockResolvedValueOnce({
+				status: 200,
+				headers: {},
+				json: {
+					items: [
+						// A series the organizer deleted: every occurrence is a tombstone.
+						instance("dead_1", "dead", "20", "cancelled"),
+						instance("dead_2", "dead", "27", "cancelled"),
+						// A live series with one skipped week.
+						instance("live_1", "live", "21", "confirmed"),
+						instance("live_2", "live", "28", "cancelled"),
+						// A cancelled one-off event.
+						instance("single", undefined, "22", "cancelled"),
+					],
+					nextSyncToken: "token-1",
+				},
+			} as never)
+			.mockResolvedValueOnce({
+				status: 200,
+				headers: {},
+				// The live series is deleted later; incremental sync reports its tombstone.
+				json: { items: [instance("live_1", "live", "21", "cancelled")], nextSyncToken: "token-2" },
+			} as never);
+
+		const first = await refreshCalendarCache(auth, "work", new Date("2026-07-01T00:00:00Z"));
+		expect(first.map((event) => event.id).sort()).toEqual(["live_1", "live_2", "single"]);
+
+		const second = await refreshCalendarCache(auth, "work", new Date("2026-07-01T00:00:00Z"));
+		expect(second.map((event) => event.id)).toEqual(["single"]);
+	});
+
 	it("keeps a range the caller actually asked for, even past the retention window", async () => {
 		const auth = deps();
 		const now = Date.parse("2026-07-10T00:00:00Z");

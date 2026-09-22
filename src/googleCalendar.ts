@@ -248,6 +248,28 @@ export function pruneCalendarCache(
 	}
 }
 
+/**
+ * With `singleEvents` and `showDeleted`, a deleted recurring series comes back
+ * as one cancelled instance per remaining occurrence — years of them for an
+ * open-ended series — and an attendee can never delete them. Google treats a
+ * cancelled instance as a skipped occurrence only while its series is alive,
+ * so instances of a series with no live occurrence left are just deletion
+ * records: drop them. Cancelled one-off events are left alone.
+ */
+export function dropDeadSeriesInstances(events: Record<string, Record<string, unknown>>): void {
+	const liveSeries = new Set<string>();
+	for (const value of Object.values(events)) {
+		const event = storedEvent(value);
+		if (event?.recurringEventId && event.status !== "cancelled") liveSeries.add(event.recurringEventId);
+	}
+	for (const [key, value] of Object.entries(events)) {
+		const event = storedEvent(value);
+		if (event?.status === "cancelled" && event.recurringEventId && !liveSeries.has(event.recurringEventId)) {
+			delete events[key];
+		}
+	}
+}
+
 function mergeEventChange(
 	events: Record<string, Record<string, unknown>>,
 	change: GoogleEvent
@@ -295,6 +317,7 @@ async function fullCalendarSync(
 	if (!result.nextSyncToken) throw new Error("Google did not return an incremental sync token.");
 	const events: Record<string, Record<string, unknown>> = {};
 	for (const event of result.items) mergeEventChange(events, event);
+	dropDeadSeriesInstances(events);
 	googleAccount(deps).calendarCaches[calendarId] = {
 		syncToken: result.nextSyncToken,
 		coverageStart: coverageStart.toISOString(),
@@ -339,6 +362,7 @@ export async function refreshCalendarCache(
 			throw new Error("Google did not return the next incremental sync token.");
 		}
 		for (const event of result.items) mergeEventChange(cache.events, event);
+		dropDeadSeriesInstances(cache.events);
 		cache.syncToken = result.nextSyncToken;
 		cache.updatedAt = Date.now();
 		pruneCalendarCache(cache, requiredStart);

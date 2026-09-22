@@ -145,6 +145,12 @@ Module responsibilities in `src/`, in dependency order:
   rather than trusting a cache that no longer holds them. The cutoff never passes the caller's
   `requiredStart`, so syncing an explicitly requested older range does not delete what it fetched.
   iCal caches need none of this: `refreshICalCalendar` replaces each feed's cache wholesale.
+  `dropDeadSeriesInstances` also runs after every full and incremental refresh. When a recurring
+  series is deleted, `singleEvents`+`showDeleted` makes Google return a cancelled instance for
+  every remaining occurrence, and an attendee can't delete them. A cancelled instance whose series
+  has no live occurrence left in the cache is only a deletion record, so it's dropped.
+  "Include cancelled" therefore still shows cancelled one-offs and skipped occurrences of live
+  series.
 - **`multiDay.ts`** — pure date-span and canonical event-identity logic. Recurring keys combine
   calendar, series, and immutable original-start identity. All-day `end.date` is treated as
   exclusive; timed spans use the configured timezone and subtract 1ms from the end so an exact

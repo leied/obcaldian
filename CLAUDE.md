@@ -161,7 +161,9 @@ Module responsibilities in `src/`, in dependency order:
     (`<!-- dailycalsync:calendar:start -->` / `...:end -->`).
   - `syncNoteCalendarSection` finds those markers in an existing note and replaces only the content
     between them, leaving the rest of the note (including user edits) untouched. If the markers are
-    missing, it no-ops and shows a `Notice` rather than guessing where to insert.
+    missing, it no-ops and shows a `Notice` rather than guessing where to insert. The one exception
+    is a raw `{calendar}` token, which is left behind when another plugin (core Daily Notes,
+    Templater) creates the note from the same template. That token is expanded in place.
   - `renderCalendarBlock` turns fetched events into markdown lines, respecting each calendar's
     `addAs` style (`"checkbox"` → `- [ ]`, `"bullet"` → `-`). The title becomes a markdown link when
     `htmlLink` is present, and a time range (`formatTimeRange`) renders in the configured timezone

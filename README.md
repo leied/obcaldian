@@ -6,6 +6,8 @@ plugin-managed section synced with multiple Google accounts and read-only Secret
 The plugin runs locally without analytics, telemetry, a publisher proxy, or a hosted backend. See
 [Privacy and data handling](PRIVACY.md) and the [security policy](SECURITY.md).
 
+[Download the latest production build](../../releases/latest/download/dailycalsync.zip)
+
 ## Features
 
 - Creates a daily note from a template you write, on demand or via ribbon icon/commands.
@@ -275,10 +277,14 @@ event metadata.
   `tests/generate-test-ical.test.ts`, which runs as part of `npm test`/CI.
 
 CI tests Node.js 20 and 22, compiles against Obsidian 1.11.4 and the latest API, and uploads an
-installable plugin artifact. To publish a release, run **Bump version and release** from GitHub
-Actions and choose `patch`, `minor`, or `major`. It updates and pushes all version metadata and the
-tag, then starts the release workflow. Tag builds require the tag to exactly match `manifest.json`,
-generate provenance attestations, and publish `main.js`, `manifest.json`, `styles.css`, and the
-installable zip as GitHub Release assets.
+installable `dailycalsync.zip` artifact on every build. To publish a production release, open the
+repository's **Actions** tab, run **Bump version and release**, and choose `patch`, `minor`, or
+`major`. The workflow updates and pushes all version metadata and the tag, then directly runs the
+release job. Tag builds require the tag to exactly match `manifest.json`, generate provenance
+attestations, and publish `main.js`, `manifest.json`, `styles.css`, and `dailycalsync.zip` as GitHub
+Release assets. The newest production ZIP is always available through the download link near the
+top of this README. To publish the current version without bumping it, run the **Release** workflow
+from the version's source branch and enter the version from `manifest.json`; after validation, the
+workflow creates the tag if it does not already exist.
 
 See `CLAUDE.md` for an architecture overview if you're working on the plugin itself.

@@ -25,15 +25,20 @@ jobs:
       - run: npm ci
       - run: npm run check
 
+      - name: Package installable plugin
+        if: matrix.node-version == 20
+        run: |
+          mkdir -p dist/dailycalsync
+          cp main.js manifest.json styles.css dist/dailycalsync/
+          cd dist
+          zip -r dailycalsync.zip dailycalsync
+
       - name: Upload installable plugin artifact
         if: matrix.node-version == 20
         uses: actions/upload-artifact@v7
         with:
           name: dailycalsync-${{ github.sha }}
-          path: |
-            main.js
-            manifest.json
-            styles.css
+          path: dist/dailycalsync.zip
           if-no-files-found: error
 
   api-compatibility:

@@ -1,7 +1,7 @@
 {
 	"id": "dailycalsync",
 	"name": "DailyCalSync",
-	"version": "0.1.0",
+	"version": "1.0.0",
 	"minAppVersion": "1.11.4",
 	"description": "Sync multiple Google accounts and Secret iCalendar feeds into managed daily-note sections.",
 	"author": "leied",

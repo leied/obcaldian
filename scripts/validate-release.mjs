@@ -17,6 +17,12 @@ function readJson(path) {
 const manifest = readJson("manifest.json");
 const packageJson = readJson("package.json");
 const versions = readJson("versions.json");
+const expectedMetadata = {
+	id: "dailycalsync",
+	name: "DailyCalSync",
+	author: "leied",
+	authorUrl: "https://github.com/leied",
+};
 const requiredManifestFields = [
 	"id",
 	"name",
@@ -31,6 +37,19 @@ for (const field of requiredManifestFields) {
 	if (manifest[field] === undefined || manifest[field] === "") {
 		fail(`manifest.json is missing required field "${field}".`);
 	}
+}
+
+for (const [field, expected] of Object.entries(expectedMetadata)) {
+	if (manifest[field] !== expected) {
+		fail(`manifest.json field "${field}" must be "${expected}".`);
+	}
+}
+
+if (packageJson.name !== expectedMetadata.id) {
+	fail(`package.json name must be "${expectedMetadata.id}".`);
+}
+if (packageJson.author !== expectedMetadata.author) {
+	fail(`package.json author must be "${expectedMetadata.author}".`);
 }
 
 if (!/^[a-z0-9-]+$/.test(manifest.id ?? "")) {

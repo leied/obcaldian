@@ -236,6 +236,20 @@ describe("syncRange status callbacks", () => {
 		);
 		expect(Notice.instances).toHaveLength(0);
 	});
+
+	it("expands a raw {calendar} token left by another plugin's template", async () => {
+		const vault = new FakeVault();
+		const todayPath = `${moment().format("YYYYMMDD")}.md`;
+		await vault.create(todayPath, "## Calendar\n{calendar}\n\nafter");
+		const onSuccess = vi.fn();
+
+		await syncRange(vault as never, connectedDeps(), 0, { notify: false, onSuccess });
+
+		const content = vault.contentOf(todayPath) ?? "";
+		expect(content).not.toContain("{calendar}");
+		expect(content).toMatch(/^## Calendar\n<!-- dailycalsync:calendar:start -->\n[\s\S]*\n<!-- dailycalsync:calendar:end -->\n\nafter$/);
+		expect(onSuccess).toHaveBeenCalled();
+	});
 });
 
 describe("sync planning, preview, and undo", () => {

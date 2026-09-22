@@ -145,6 +145,12 @@ Module responsibilities in `src/`, in dependency order:
   rather than trusting a cache that no longer holds them. The cutoff never passes the caller's
   `requiredStart`, so syncing an explicitly requested older range does not delete what it fetched.
   iCal caches need none of this: `refreshICalCalendar` replaces each feed's cache wholesale.
+  `dropDeadSeriesInstances` also runs after every full and incremental refresh. When a recurring
+  series is deleted, `singleEvents`+`showDeleted` makes Google return a cancelled instance for
+  every remaining occurrence, and an attendee can't delete them. A cancelled instance whose series
+  has no live occurrence left in the cache is only a deletion record, so it's dropped.
+  "Include cancelled" therefore still shows cancelled one-offs and skipped occurrences of live
+  series.
 - **`multiDay.ts`** — pure date-span and canonical event-identity logic. Recurring keys combine
   calendar, series, and immutable original-start identity. All-day `end.date` is treated as
   exclusive; timed spans use the configured timezone and subtract 1ms from the end so an exact
@@ -161,7 +167,9 @@ Module responsibilities in `src/`, in dependency order:
     (`<!-- dailycalsync:calendar:start -->` / `...:end -->`).
   - `syncNoteCalendarSection` finds those markers in an existing note and replaces only the content
     between them, leaving the rest of the note (including user edits) untouched. If the markers are
-    missing, it no-ops and shows a `Notice` rather than guessing where to insert.
+    missing, it no-ops and shows a `Notice` rather than guessing where to insert. The one exception
+    is a raw `{calendar}` token, which is left behind when another plugin (core Daily Notes,
+    Templater) creates the note from the same template. That token is expanded in place.
   - `renderCalendarBlock` turns fetched events into markdown lines, respecting each calendar's
     `addAs` style (`"checkbox"` → `- [ ]`, `"bullet"` → `-`). The title becomes a markdown link when
     `htmlLink` is present, and a time range (`formatTimeRange`) renders in the configured timezone

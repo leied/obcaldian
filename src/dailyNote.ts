@@ -123,7 +123,13 @@ export function calendarSectionFromContent(content: string): string | null {
 
 export function replaceCalendarSectionContent(content: string, renderedBlock: string): string | null {
 	const range = markerRange(content);
-	if (!range) return null;
+	if (!range) {
+		// Notes created from the same template by another plugin (core Daily
+		// Notes, Templater) still hold the raw token; it marks the intended spot.
+		const tokenIndex = content.indexOf(CALENDAR_TOKEN);
+		if (tokenIndex === -1) return null;
+		return content.slice(0, tokenIndex) + markerBlock(renderedBlock) + content.slice(tokenIndex + CALENDAR_TOKEN.length);
+	}
 	const before = content.slice(0, range.startIndex);
 	const after = content.slice(range.endIndex + range.endMarker.length);
 	return `${before}${markerBlock(renderedBlock)}${after}`;

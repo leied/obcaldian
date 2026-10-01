@@ -364,11 +364,20 @@ function safeHtmlText(value: string): string {
 		.replace(/>/g, "&gt;");
 }
 
+/**
+ * Neutralizes block syntax `safeInlineText` leaves alone at the start of a line:
+ * `---`/`===` rules (a setext heading or thematic break inside a footnote),
+ * `- ` bullets, `~~~` fences, and `1.` ordered-list markers.
+ */
+function escapeLineStart(line: string): string {
+	return line.replace(/^([-=~])/, "\\$1").replace(/^(\d+)([.)])/, "$1\\$2");
+}
+
 function safeMultilineText(value: string): string {
 	return value
 		.replace(/\r\n?/g, "\n")
 		.split("\n")
-		.map((line) => safeInlineText(line))
+		.map((line) => escapeLineStart(safeInlineText(line)))
 		.filter(Boolean)
 		.join(`\n${FOOTNOTE_CONTINUATION_INDENT}`);
 }
@@ -658,7 +667,8 @@ export function renderCalendarBlock(
 		return "_(no events)_";
 	}
 	const blocks = [lines.join("\n")];
-	if (footnotes.length > 0) blocks.push(footnotes.join("\n"));
+	// Blank-line separated: Obsidian can lose track of a definition run together with its neighbours.
+	if (footnotes.length > 0) blocks.push(footnotes.join("\n\n"));
 	// Last, and only once: the identity index every event line would otherwise
 	// have to carry inline, where Obsidian puts it in the reader's way.
 	if (indexEntries.length > 0) blocks.push(renderEventIndex(indexEntries));

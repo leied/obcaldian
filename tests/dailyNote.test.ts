@@ -492,6 +492,31 @@ describe("renderCalendarBlock", () => {
 		expect(block).not.toContain("Medical appointment");
 		expect(block).not.toContain("Sensitive details");
 	});
+
+	it("omits every footnote when showFootnotes is off, and keeps them when on", () => {
+		const event: GoogleEvent = {
+			id: "e1",
+			summary: "Lecture",
+			description: "Bring a laptop",
+			location: "Room 1",
+			start: { dateTime: "2026-01-05T10:00:00Z" },
+			end: { dateTime: "2026-01-05T11:00:00Z" },
+		};
+		const render = (showFootnotes: boolean) =>
+			renderCalendarBlock(
+				calendars,
+				new Map([["work", [event]]]),
+				"UTC",
+				undefined,
+				new Set(),
+				{ ...DEFAULT_SETTINGS.rendering, showFootnotes }
+			);
+		expect(render(true)).toContain("[^dailycalsync-1]: Bring a laptop");
+		const off = render(false);
+		expect(off).toContain("Lecture");
+		expect(off).not.toContain("[^dailycalsync");
+		expect(off).not.toContain("Bring a laptop");
+	});
 });
 
 describe("ensureDailyNote", () => {

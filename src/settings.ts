@@ -77,6 +77,7 @@ export interface RecentSyncFailure {
 
 export interface RenderingSettings {
 	allDayFirst: boolean;
+	showFootnotes: boolean;
 	showDescriptions: boolean;
 	showAttendees: boolean;
 	includeAttendeeEmails: boolean;
@@ -128,6 +129,7 @@ function detectSystemTimezone(): string {
 
 export const DEFAULT_RENDERING_SETTINGS: RenderingSettings = {
 	allDayFirst: true,
+	showFootnotes: true,
 	showDescriptions: true,
 	showAttendees: true,
 	includeAttendeeEmails: true,
@@ -338,6 +340,7 @@ function normalizeRendering(value: unknown): RenderingSettings {
 	const defaults = DEFAULT_RENDERING_SETTINGS;
 	return {
 		allDayFirst: booleanValue(raw.allDayFirst, defaults.allDayFirst),
+		showFootnotes: booleanValue(raw.showFootnotes, defaults.showFootnotes),
 		showDescriptions: booleanValue(raw.showDescriptions, defaults.showDescriptions),
 		showAttendees: booleanValue(raw.showAttendees, defaults.showAttendees),
 		includeAttendeeEmails: booleanValue(raw.includeAttendeeEmails, defaults.includeAttendeeEmails),

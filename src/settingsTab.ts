@@ -390,11 +390,21 @@ export class DailyCalSyncSettingTab extends PluginSettingTab {
 		addToggle("End times", "Show event end times.", "showEndTime");
 
 		new Setting(this.containerEl).setName("Event details and privacy").setHeading();
-		addToggle("Descriptions", "Persist event descriptions in footnotes.", "showDescriptions");
-		addToggle("Attendees", "Persist attendee lists for events with at least three attendees.", "showAttendees");
-		addToggle("Attendee email addresses", "Use emails when display names are unavailable.", "includeAttendeeEmails");
-		addToggle("Locations", "Persist event locations.", "showLocations");
-		addToggle("Meeting links", "Persist HTTPS meeting links.", "showMeetingLinks");
+		new Setting(this.containerEl)
+			.setName("Sync event details as footnotes")
+			.setDesc("Master switch. Off keeps only the event line (time, title, link); descriptions, locations, meeting links, and attendees are left out and removed from the managed section on the next sync.")
+			.addToggle((toggle) => toggle.setValue(settings.rendering.showFootnotes).onChange(async (value) => {
+				settings.rendering.showFootnotes = value;
+				await this.plugin.saveSettings();
+				this.display();
+			}));
+		if (settings.rendering.showFootnotes) {
+			addToggle("Descriptions", "Persist event descriptions in footnotes.", "showDescriptions");
+			addToggle("Attendees", "Persist attendee lists for events with at least three attendees.", "showAttendees");
+			addToggle("Attendee email addresses", "Use emails when display names are unavailable.", "includeAttendeeEmails");
+			addToggle("Locations", "Persist event locations.", "showLocations");
+			addToggle("Meeting links", "Persist HTTPS meeting links.", "showMeetingLinks");
+		}
 		addToggle("Redact private events", "Render private events as Busy.", "redactPrivateEvents");
 
 		new Setting(this.containerEl).setName("Event filters").setHeading();

@@ -471,11 +471,13 @@ export function eventIsIncluded(event: GoogleEvent, rendering: RenderingSettings
 
 /**
  * Builds a footnote's body for an event: its description (if any), plus a
- * participant list when there are enough attendees to be worth naming. Lines
+ * participant list when there are enough attendees to be worth naming. The
+ * `showFootnotes` master switch turns the whole thing off. Lines
  * after the first are indented so markdown treats them as part of the same
  * footnote definition. Returns null when there's nothing worth footnoting.
  */
 function footnoteBody(ev: GoogleEvent, rendering: RenderingSettings): string | null {
+	if (!rendering.showFootnotes) return null;
 	const parts: string[] = [];
 	const description = ev.description?.trim();
 	if (description && rendering.showDescriptions) {

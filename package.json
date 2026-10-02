@@ -1,6 +1,6 @@
 {
 	"name": "dailycalsync",
-	"version": "1.0.0",
+	"version": "1.1.0",
 	"description": "Sync multiple Google accounts and Secret iCalendar feeds into managed daily-note sections.",
 	"main": "main.js",
 	"scripts": {

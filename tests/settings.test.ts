@@ -78,4 +78,9 @@ describe("loadSettingsData", () => {
 		expect(loaded.settings.rendering.hourCycle).toBe("24");
 		expect(loaded.settings.rendering.showDescriptions).toBe(false);
 	});
+
+	it("keeps a persisted showFootnotes choice and defaults it on for older data", () => {
+		expect(loadSettingsData({ rendering: { showFootnotes: false } }).settings.rendering.showFootnotes).toBe(false);
+		expect(loadSettingsData({ rendering: {} }).settings.rendering.showFootnotes).toBe(true);
+	});
 });

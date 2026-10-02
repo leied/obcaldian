@@ -196,6 +196,7 @@ describe("renderCalendarBlock", () => {
 				"",
 				"[^dailycalsync-1]: Project kickoff.",
 				"    **Participants:** a@example.com, b@example.com, c@example.com",
+				"",
 				"[^dailycalsync-2]: Sprint retro.",
 			].join("\n")
 		);
@@ -492,6 +493,31 @@ describe("renderCalendarBlock", () => {
 		expect(block).not.toContain("Medical appointment");
 		expect(block).not.toContain("Sensitive details");
 	});
+
+	it("omits every footnote when showFootnotes is off, and keeps them when on", () => {
+		const event: GoogleEvent = {
+			id: "e1",
+			summary: "Lecture",
+			description: "Bring a laptop",
+			location: "Room 1",
+			start: { dateTime: "2026-01-05T10:00:00Z" },
+			end: { dateTime: "2026-01-05T11:00:00Z" },
+		};
+		const render = (showFootnotes: boolean) =>
+			renderCalendarBlock(
+				calendars,
+				new Map([["work", [event]]]),
+				"UTC",
+				undefined,
+				new Set(),
+				{ ...DEFAULT_SETTINGS.rendering, showFootnotes }
+			);
+		expect(render(true)).toContain("[^dailycalsync-1]: Bring a laptop");
+		const off = render(false);
+		expect(off).toContain("Lecture");
+		expect(off).not.toContain("[^dailycalsync");
+		expect(off).not.toContain("Bring a laptop");
+	});
 });
 
 describe("ensureDailyNote", () => {
@@ -641,5 +667,36 @@ describe("syncNoteCalendarSection", () => {
 		expect(vault.contentOf("20260722.md")).toContain(
 			"<!-- dailycalsync:calendar:start -->\nnew block\n<!-- dailycalsync:calendar:end -->"
 		);
+	});
+});
+
+describe("footnote layout", () => {
+	const event: GoogleEvent = {
+		id: "e1",
+		summary: "Lecture",
+		description: "Intro\n---------------------\n- item\n1. first\n=====",
+		start: { dateTime: "2026-01-05T10:00:00Z" },
+		end: { dateTime: "2026-01-05T11:00:00Z" },
+	};
+	const render = (events: GoogleEvent[]) =>
+		renderCalendarBlock(
+			[{ id: "work", summary: "Work", enabled: true, addAs: "checkbox" }],
+			new Map([["work", events]]),
+			"UTC"
+		);
+
+	it("separates footnote definitions with a blank line", () => {
+		const block = render([event, { ...event, id: "e2", description: "Second" }]);
+		expect(block).toContain("\n\n[^dailycalsync-2]: Second");
+	});
+
+	it("escapes line-start rules, bullets, and ordered markers inside a footnote", () => {
+		const block = render([event]);
+		for (const line of block.split("\n").filter((l) => l.startsWith("    "))) {
+			expect(line.trimStart()).not.toMatch(/^(-|=|~|\d+[.)])/);
+		}
+		expect(block).toContain("    \\---------------------");
+		expect(block).toContain("    \\- item");
+		expect(block).toContain("    1\\. first");
 	});
 });
